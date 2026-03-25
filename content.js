@@ -3,10 +3,16 @@
   window.__chatgptNavigatorInstalled = true;
 
   const STORAGE_KEY = "scrollLockEnabled";
-  const UI_ID = "chatgpt-nav-widget";
+  const HOST_ID = "chatanchor-host";
+  const PANEL_ID = "chatanchor-panel";
   const TOC_CHAR_LIMIT = 50;
-  const TOC_MAX_HEIGHT = 220;
+  const TOC_MIN_HEIGHT = 168;
+  const TOC_MAX_HEIGHT = 480;
+  const TOC_ITEM_HEIGHT = 36;
+  const PANEL_RESERVED_HEIGHT = 112;
+  const PANEL_VIEWPORT_MARGIN = 40;
   const LONG_JUMP_PX = 1200;
+  const USER_SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
 
   const STATE = {
     scrollLockEnabled: false,
@@ -15,24 +21,24 @@
     suppressRestoreUntil: 0,
     userScrollUntil: 0,
     navInFlight: false,
-    initComplete: false,
-    observer: null,
     messages: [],
-    tocSignature: "",
-    scanTimer: null,
-    restoreTimer: null,
-    activeRaf: 0,
+    messagesSignature: "",
+    observer: null,
+    scanTimer: 0,
+    restoreTimer: 0,
+    settleTimer: 0,
+    urlPollTimer: 0,
+    lastHref: location.href,
+    bootRetries: 0,
+    ui: {
+      host: null,
+      shadow: null,
+      panel: null,
+      tocWrap: null,
+      toc: null,
+      lockBtn: null,
+    },
   };
-
-  const USER_SCROLL_KEYS = new Set([
-    "ArrowUp",
-    "ArrowDown",
-    "PageUp",
-    "PageDown",
-    "Home",
-    "End",
-    " ",
-  ]);
 
   const now = () => Date.now();
 
@@ -44,47 +50,50 @@
     return Math.min(max, Math.max(min, value));
   }
 
+  function truncateText(text, maxChars = TOC_CHAR_LIMIT) {
+    const clean = (text || "").replace(/\s+/g, " ").trim();
+    if (!clean) return "(empty message)";
+    if (clean.length <= maxChars) return clean;
+    return `${clean.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  }
+
   function getScrollableAncestors(node) {
     const out = [];
-    let current = node;
+    let current = node instanceof Element ? node : null;
     while (current && current !== document.documentElement) {
-      if (current instanceof Element) {
-        const style = getComputedStyle(current);
-        const overflowY = style.overflowY;
-        const isScrollable =
-          (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
-          current.scrollHeight > current.clientHeight + 10;
-        if (isScrollable) out.push(current);
-      }
+      const style = getComputedStyle(current);
+      const overflowY = style.overflowY;
+      const isScrollable =
+        (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
+        current.scrollHeight > current.clientHeight + 10;
+      if (isScrollable) out.push(current);
       current = current.parentElement;
     }
     return out;
   }
 
   function getScrollRoot() {
-    const candidateRoots = [];
+    const roots = [];
     const main = document.querySelector("main") || document.querySelector('[role="main"]');
+    const form = document.querySelector("form");
+    const textarea = document.querySelector("textarea");
+
     if (main) {
-      candidateRoots.push(...getScrollableAncestors(main));
-      candidateRoots.push(main);
+      roots.push(...getScrollableAncestors(main));
+      roots.push(main);
     }
+    if (form) roots.push(...getScrollableAncestors(form));
+    if (textarea) roots.push(...getScrollableAncestors(textarea));
+    roots.push(document.scrollingElement, document.documentElement, document.body);
 
-    const composer = document.querySelector("form") || document.querySelector("textarea");
-    if (composer) candidateRoots.push(...getScrollableAncestors(composer));
+    const unique = roots.filter(Boolean).filter((el, idx, arr) => arr.indexOf(el) === idx);
+    const candidates = unique
+      .filter((el) => el.scrollHeight > el.clientHeight + 10)
+      .map((el) => ({ el, score: (el.scrollHeight - el.clientHeight) + el.clientHeight }));
 
-    candidateRoots.push(document.scrollingElement, document.documentElement, document.body);
-
-    const unique = candidateRoots.filter(Boolean).filter((el, idx, arr) => arr.indexOf(el) === idx);
-    const scored = unique
-      .map((el) => ({ el, score: (el.scrollHeight - el.clientHeight) + el.clientHeight }))
-      .filter(({ el }) => el.scrollHeight > el.clientHeight + 10);
-
-    if (scored.length) {
-      scored.sort((a, b) => b.score - a.score);
-      return scored[0].el;
-    }
-
-    return document.scrollingElement || document.documentElement;
+    if (!candidates.length) return document.scrollingElement || document.documentElement;
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0].el;
   }
 
   function isWindowRoot(root) {
@@ -114,14 +123,14 @@
   }
 
   function isElementVisible(el) {
-    if (!el || !el.isConnected) return false;
+    if (!(el instanceof Element) || !el.isConnected) return false;
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   }
 
   function normalizeMessageNode(node) {
-    if (!node || !(node instanceof Element)) return null;
-    return node.closest("article") || node.closest("[data-message-author-role]") || node;
+    if (!(node instanceof Element)) return null;
+    return node.closest("article") || node.closest('[data-message-author-role="user"]') || node;
   }
 
   function queryUserMessages() {
@@ -129,8 +138,8 @@
       '[data-message-author-role="user"]',
       '[data-author="user"]',
       'article[data-author="user"]',
-      'article [data-message-author-role="user"]',
-      '[data-testid^="conversation-turn-"][data-message-author-role="user"]'
+      '[data-testid^="conversation-turn-"] [data-message-author-role="user"]',
+      'article [data-message-author-role="user"]'
     ];
 
     const nodes = [];
@@ -151,7 +160,7 @@
   }
 
   function getMessageText(el) {
-    if (!el) return "";
+    if (!(el instanceof Element)) return "";
     const candidates = [
       el.querySelector('[data-message-author-role="user"]'),
       el.querySelector('[data-testid*="user"]'),
@@ -165,16 +174,229 @@
     return "";
   }
 
-  function truncateText(text, maxChars = TOC_CHAR_LIMIT) {
-    if (!text) return "(empty message)";
-    if (text.length <= maxChars) return text;
-    return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  function buildMessageSignature(messages) {
+    return messages
+      .map((el, idx) => `${idx}:${truncateText(getMessageText(el), 80)}`)
+      .join("\n");
   }
 
-  function getElementMidYInViewport(el, root) {
-    const rect = el.getBoundingClientRect();
-    const metrics = getViewportMetrics(root);
-    return rect.top - metrics.top + rect.height / 2;
+  function updateTOCLayout() {
+    const panel = STATE.ui.panel;
+    const toc = STATE.ui.toc;
+    if (!(panel instanceof HTMLElement) || !(toc instanceof HTMLElement)) return;
+
+    const viewportHeight = Math.max(window.innerHeight || 0, 320);
+    const panelMaxHeight = Math.max(220, viewportHeight - PANEL_VIEWPORT_MARGIN);
+    const availableTOCHeight = Math.max(96, panelMaxHeight - PANEL_RESERVED_HEIGHT);
+    const minTOCHeight = Math.min(TOC_MIN_HEIGHT, availableTOCHeight);
+    const desiredHeight = STATE.messages.length
+      ? clamp(STATE.messages.length * TOC_ITEM_HEIGHT, minTOCHeight, TOC_MAX_HEIGHT)
+      : minTOCHeight;
+    const tocHeight = clamp(desiredHeight, minTOCHeight, availableTOCHeight);
+
+    panel.style.maxHeight = `${panelMaxHeight}px`;
+    toc.style.height = `${tocHeight}px`;
+    toc.style.maxHeight = `${availableTOCHeight}px`;
+  }
+
+  function ensureUI() {
+    if (STATE.ui.host?.isConnected && STATE.ui.shadow) return;
+
+    let host = document.getElementById(HOST_ID);
+    if (!(host instanceof HTMLElement)) {
+      host = document.createElement("div");
+      host.id = HOST_ID;
+      host.style.position = "fixed";
+      host.style.right = "20px";
+      host.style.bottom = "20px";
+      host.style.zIndex = "2147483647";
+      host.style.pointerEvents = "none";
+      document.documentElement.appendChild(host);
+    }
+
+    const shadow = host.shadowRoot || host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <style>
+        :host { all: initial; }
+        #${PANEL_ID} {
+          pointer-events: auto;
+          box-sizing: border-box;
+          width: 248px;
+          max-width: min(248px, calc(100vw - 32px));
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          padding: 10px;
+          border-radius: 16px;
+          background: rgba(20,20,20,0.76);
+          backdrop-filter: blur(8px);
+          -webkit-backdrop-filter: blur(8px);
+          border: 1px solid rgba(255,255,255,0.12);
+          box-shadow: 0 10px 30px rgba(0,0,0,0.22);
+          font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          color: white;
+          overflow: hidden;
+          max-height: calc(100vh - ${PANEL_VIEWPORT_MARGIN}px);
+        }
+        .toc-wrap {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          min-height: 0;
+          flex: 1 1 auto;
+        }
+        .toc-label {
+          color: rgba(255,255,255,0.86);
+          font-size: 12px;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+          padding: 0 2px;
+        }
+        .toc {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          min-height: 96px;
+          height: ${TOC_MIN_HEIGHT}px;
+          max-height: ${TOC_MAX_HEIGHT}px;
+          flex: 1 1 auto;
+          overflow-y: auto;
+          padding-right: 2px;
+          scrollbar-gutter: stable;
+        }
+        .toc-item {
+          width: 100%;
+          display: block;
+          text-align: left;
+          padding: 7px 9px;
+          border-radius: 10px;
+          border: 1px solid rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.06);
+          color: white;
+          font-size: 12px;
+          line-height: 1.3;
+          cursor: pointer;
+          margin: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .toc-item:hover { background: rgba(255,255,255,0.12); }
+        .toc-item.active {
+          background: rgba(255,255,255,0.16);
+          border-color: rgba(255,255,255,0.28);
+        }
+        .buttons {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .btn {
+          min-width: 0;
+          height: 38px;
+          border-radius: 12px;
+          border: 1px solid rgba(255,255,255,0.16);
+          background: rgba(255,255,255,0.08);
+          color: white;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
+        }
+        .btn:hover { background: rgba(255,255,255,0.16); }
+        .btn:active { transform: translateY(1px); }
+        .empty {
+          color: rgba(255,255,255,0.7);
+          font-size: 12px;
+          line-height: 1.4;
+          padding: 6px 2px;
+        }
+      </style>
+      <div id="${PANEL_ID}">
+        <div class="toc-wrap">
+          <div class="toc-label">Your prompts</div>
+          <div class="toc"></div>
+        </div>
+        <div class="buttons">
+          <button class="btn up" type="button" title="Jump to previous prompt you sent">▲</button>
+          <button class="btn down" type="button" title="Jump to next prompt you sent">▼</button>
+          <button class="btn lock" type="button" title="Toggle scroll lock">Follow</button>
+        </div>
+      </div>
+    `;
+
+    STATE.ui.host = host;
+    STATE.ui.shadow = shadow;
+    STATE.ui.panel = shadow.getElementById(PANEL_ID);
+    STATE.ui.tocWrap = shadow.querySelector(".toc-wrap");
+    STATE.ui.toc = shadow.querySelector(".toc");
+    STATE.ui.lockBtn = shadow.querySelector(".lock");
+
+    shadow.querySelector(".up")?.addEventListener("click", () => { void jump(-1); });
+    shadow.querySelector(".down")?.addEventListener("click", () => { void jump(1); });
+    STATE.ui.lockBtn?.addEventListener("click", () => {
+      applyLockState(!STATE.scrollLockEnabled, true);
+    });
+
+    applyLockState(STATE.scrollLockEnabled, false);
+    renderTOC(true);
+  }
+
+  function updateLockButton() {
+    const btn = STATE.ui.lockBtn;
+    if (!btn) return;
+    btn.textContent = STATE.scrollLockEnabled ? "Stay" : "Follow";
+    btn.setAttribute("aria-pressed", String(STATE.scrollLockEnabled));
+    btn.title = STATE.scrollLockEnabled
+      ? "Scroll lock is ON: stay at the current position"
+      : "Scroll lock is OFF: follow the latest messages";
+    btn.style.opacity = STATE.scrollLockEnabled ? "1" : "0.84";
+  }
+
+  function renderTOC(force = false) {
+    ensureUI();
+    const toc = STATE.ui.toc;
+    if (!toc) return;
+
+    const signature = buildMessageSignature(STATE.messages);
+    const root = getScrollRoot();
+    const activeIndex = STATE.messages.length ? findNearestVisibleIndex(STATE.messages, root) : -1;
+    if (activeIndex >= 0 && !STATE.navInFlight) STATE.currentIndex = activeIndex;
+
+    if (!force && signature === STATE.messagesSignature && toc.childElementCount === STATE.messages.length) {
+      [...toc.children].forEach((child, idx) => {
+        if (child instanceof HTMLElement) child.classList.toggle("active", idx === activeIndex);
+      });
+      const active = toc.children[activeIndex];
+      if (active instanceof HTMLElement) active.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "auto" });
+      updateTOCLayout();
+      return;
+    }
+
+    STATE.messagesSignature = signature;
+    toc.innerHTML = "";
+
+    if (!STATE.messages.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No prompts found yet";
+      toc.appendChild(empty);
+      updateTOCLayout();
+      return;
+    }
+
+    STATE.messages.forEach((node, idx) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = `toc-item${idx === activeIndex ? " active" : ""}`;
+      const rawText = getMessageText(node);
+      item.textContent = truncateText(rawText);
+      item.title = rawText || "(empty message)";
+      item.addEventListener("click", () => { void jumpToIndex(idx); });
+      toc.appendChild(item);
+    });
+
+    updateTOCLayout();
   }
 
   function findNearestVisibleIndex(nodes, root) {
@@ -185,7 +407,8 @@
     let bestDist = Infinity;
 
     for (let i = 0; i < nodes.length; i += 1) {
-      const mid = getElementMidYInViewport(nodes[i], root);
+      const rect = nodes[i].getBoundingClientRect();
+      const mid = rect.top - metrics.top + rect.height / 2;
       const dist = Math.abs(mid - anchor);
       if (dist < bestDist) {
         bestDist = dist;
@@ -195,84 +418,7 @@
     return bestIdx;
   }
 
-  function getTargetTopForCenter(el, root) {
-    const rect = el.getBoundingClientRect();
-    const metrics = getViewportMetrics(root);
-    const currentTop = getScrollTop(root);
-    const offsetWithinRoot = rect.top - metrics.top;
-    return currentTop + offsetWithinRoot - (metrics.height / 2) + (rect.height / 2);
-  }
-
-  function fastScrollToTop(root, targetTop, { minDuration = 80, maxDuration = 160, pxPerMs = 20 } = {}) {
-    const startTop = getScrollTop(root);
-    const distance = targetTop - startTop;
-    const absDistance = Math.abs(distance);
-
-    if (absDistance < 12) {
-      setScrollTop(root, targetTop, "auto");
-      return Promise.resolve();
-    }
-
-    const duration = Math.max(minDuration, Math.min(maxDuration, absDistance / pxPerMs));
-    const startedAt = performance.now();
-    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
-
-    return new Promise((resolve) => {
-      function frame(ts) {
-        const elapsed = ts - startedAt;
-        const t = Math.min(1, elapsed / duration);
-        const eased = easeOutCubic(t);
-        setScrollTop(root, startTop + distance * eased, "auto");
-        if (t < 1) {
-          window.requestAnimationFrame(frame);
-        } else {
-          setScrollTop(root, targetTop, "auto");
-          resolve();
-        }
-      }
-      window.requestAnimationFrame(frame);
-    });
-  }
-
-  async function scrollElementToCenter(el) {
-    if (!el || !el.isConnected) return;
-
-    const root = getScrollRoot();
-    const targetTop = getTargetTopForCenter(el, root);
-    const distance = Math.abs(targetTop - getScrollTop(root));
-
-    STATE.navInFlight = true;
-    try {
-      dispatchToPage("CHATGPT_NAV_ALLOW_SCROLL_ONCE", { ms: 600 });
-      STATE.suppressRestoreUntil = now() + 400;
-      if (distance < LONG_JUMP_PX) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        await new Promise((resolve) => window.setTimeout(resolve, 180));
-      } else {
-        await fastScrollToTop(root, targetTop);
-      }
-      STATE.lockedScrollTop = getScrollTop(root);
-    } finally {
-      STATE.navInFlight = false;
-      STATE.suppressRestoreUntil = now() + 80;
-      updateActiveHighlightSoon();
-    }
-  }
-
-  async function jump(dir) {
-    const nodes = STATE.messages.length ? STATE.messages : queryUserMessages();
-    if (!nodes.length || STATE.navInFlight) return;
-
-    const root = getScrollRoot();
-    if (STATE.currentIndex < 0 || STATE.currentIndex >= nodes.length) {
-      STATE.currentIndex = findNearestVisibleIndex(nodes, root);
-    }
-
-    STATE.currentIndex = clamp(STATE.currentIndex + dir, 0, nodes.length - 1);
-    await scrollElementToCenter(nodes[STATE.currentIndex]);
-  }
-
-  function setUserScrollIntent(ms = 800) {
+  function setUserScrollIntent(ms = 900) {
     STATE.userScrollUntil = now() + ms;
   }
 
@@ -292,308 +438,226 @@
 
   function scheduleRestoreBurst() {
     if (!STATE.scrollLockEnabled || STATE.navInFlight) return;
-    window.clearTimeout(STATE.restoreTimer);
+    clearTimeout(STATE.restoreTimer);
     let ticks = 0;
     const run = () => {
       maybeRestoreScroll();
       ticks += 1;
-      if (ticks < 4) STATE.restoreTimer = window.setTimeout(run, 70);
+      if (ticks < 8) STATE.restoreTimer = window.setTimeout(run, 60);
     };
     STATE.restoreTimer = window.setTimeout(run, 0);
   }
 
-  function updateLockButton() {
-    const btn = document.querySelector(`#${UI_ID} .chatgpt-nav-lock`);
-    if (!btn) return;
-    btn.textContent = STATE.scrollLockEnabled ? "Stay" : "Follow";
-    btn.setAttribute("aria-pressed", String(STATE.scrollLockEnabled));
-    btn.title = STATE.scrollLockEnabled
-      ? "Scroll lock is ON: stay at the current position"
-      : "Scroll lock is OFF: follow the latest messages";
-    btn.style.opacity = STATE.scrollLockEnabled ? "1" : "0.82";
-  }
-
   function applyLockState(enabled, persist = true) {
     STATE.scrollLockEnabled = Boolean(enabled);
+    updateLockButton();
     if (persist && chrome?.storage?.local) {
       chrome.storage.local.set({ [STORAGE_KEY]: STATE.scrollLockEnabled });
     }
     dispatchToPage("CHATGPT_NAV_SET_LOCK", { enabled: STATE.scrollLockEnabled });
-    updateLockButton();
     if (STATE.scrollLockEnabled) {
       updateLockedPositionFromCurrent();
       scheduleRestoreBurst();
     }
   }
 
-  function setButtonStyle(btn) {
-    Object.assign(btn.style, {
-      minWidth: "56px",
-      height: "36px",
-      borderRadius: "10px",
-      border: "1px solid rgba(255,255,255,0.14)",
-      background: "rgba(255,255,255,0.08)",
-      color: "white",
-      fontSize: "13px",
-      fontWeight: "600",
-      cursor: "pointer",
-      transition: "background 120ms ease, opacity 120ms ease"
-    });
-    btn.addEventListener("mouseenter", () => {
-      btn.style.background = "rgba(255,255,255,0.15)";
-    });
-    btn.addEventListener("mouseleave", () => {
-      btn.style.background = "rgba(255,255,255,0.08)";
-    });
+  function getTargetTopForCenter(el, root) {
+    const rect = el.getBoundingClientRect();
+    const metrics = getViewportMetrics(root);
+    const currentTop = getScrollTop(root);
+    const absoluteTop = currentTop + (rect.top - metrics.top);
+    const maxTop = Math.max(0, root.scrollHeight - metrics.height);
+    return clamp(absoluteTop - metrics.height / 2 + rect.height / 2, 0, maxTop);
   }
 
-  function buildUI() {
-    if (document.getElementById(UI_ID)) return;
-
-    const box = document.createElement("div");
-    box.id = UI_ID;
-    Object.assign(box.style, {
-      position: "fixed",
-      right: "16px",
-      bottom: "16px",
-      zIndex: "2147483647",
-      display: "flex",
-      flexDirection: "column",
-      gap: "8px",
-      width: "220px",
-      padding: "8px",
-      borderRadius: "14px",
-      background: "rgba(20,20,20,0.78)",
-      backdropFilter: "blur(8px)",
-      boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
-      border: "1px solid rgba(255,255,255,0.10)",
-      fontFamily: "ui-sans-serif, system-ui, sans-serif"
-    });
-
-    const toc = document.createElement("div");
-    toc.className = "chatgpt-nav-toc";
-    Object.assign(toc.style, {
-      display: "flex",
-      flexDirection: "column",
-      gap: "4px",
-      maxHeight: `${TOC_MAX_HEIGHT}px`,
-      overflowY: "auto",
-      paddingRight: "2px",
-      marginBottom: "2px"
-    });
-
-    const controls = document.createElement("div");
-    Object.assign(controls.style, {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr 1fr",
-      gap: "6px"
-    });
-
-    const up = document.createElement("button");
-    up.type = "button";
-    up.className = "chatgpt-nav-up";
-    up.textContent = "▲";
-    up.title = "Jump to previous prompt you sent";
-    setButtonStyle(up);
-    up.addEventListener("click", () => void jump(-1));
-
-    const down = document.createElement("button");
-    down.type = "button";
-    down.className = "chatgpt-nav-down";
-    down.textContent = "▼";
-    down.title = "Jump to next prompt you sent";
-    setButtonStyle(down);
-    down.addEventListener("click", () => void jump(1));
-
-    const lock = document.createElement("button");
-    lock.type = "button";
-    lock.className = "chatgpt-nav-lock";
-    lock.title = "Toggle scroll lock";
-    setButtonStyle(lock);
-    lock.addEventListener("click", () => applyLockState(!STATE.scrollLockEnabled, true));
-
-    controls.appendChild(up);
-    controls.appendChild(down);
-    controls.appendChild(lock);
-    box.appendChild(toc);
-    box.appendChild(controls);
-    document.body.appendChild(box);
-    updateLockButton();
-  }
-
-  function buildTocSignature(messages) {
-    return messages.map((el) => `${truncateText(getMessageText(el))}|${el.isConnected ? 1 : 0}`).join("\n");
-  }
-
-  function renderTOC(force = false) {
-    const toc = document.querySelector(`#${UI_ID} .chatgpt-nav-toc`);
-    if (!toc) return;
-
-    const messages = STATE.messages;
-    const nextSignature = buildTocSignature(messages);
-    if (!force && nextSignature === STATE.tocSignature) {
-      updateActiveHighlightSoon();
-      return;
+  function fastScrollToTop(root, targetTop, { minDuration = 80, maxDuration = 170, pxPerMs = 20 } = {}) {
+    const startTop = getScrollTop(root);
+    const distance = targetTop - startTop;
+    const absDistance = Math.abs(distance);
+    if (absDistance < 12) {
+      setScrollTop(root, targetTop, "auto");
+      return Promise.resolve();
     }
 
-    STATE.tocSignature = nextSignature;
-    toc.replaceChildren();
+    const duration = Math.max(minDuration, Math.min(maxDuration, absDistance / pxPerMs));
+    const startedAt = performance.now();
+    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 
-    const frag = document.createDocumentFragment();
-    messages.forEach((el, index) => {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.className = "chatgpt-nav-toc-item";
-      item.dataset.index = String(index);
-      item.textContent = `${index + 1}. ${truncateText(getMessageText(el))}`;
-      item.title = getMessageText(el) || "(empty message)";
-      Object.assign(item.style, {
-        width: "100%",
-        textAlign: "left",
-        padding: "6px 8px",
-        borderRadius: "8px",
-        border: "1px solid rgba(255,255,255,0.08)",
-        background: "rgba(255,255,255,0.04)",
-        color: "white",
-        fontSize: "12px",
-        lineHeight: "1.25",
-        cursor: "pointer",
-        opacity: "0.92"
-      });
-      item.addEventListener("click", async () => {
-        STATE.currentIndex = index;
-        await scrollElementToCenter(el);
-      });
-      frag.appendChild(item);
+    return new Promise((resolve) => {
+      function frame(ts) {
+        const elapsed = ts - startedAt;
+        const t = Math.min(1, elapsed / duration);
+        setScrollTop(root, startTop + distance * easeOutCubic(t), "auto");
+        if (t < 1) {
+          requestAnimationFrame(frame);
+        } else {
+          setScrollTop(root, targetTop, "auto");
+          resolve();
+        }
+      }
+      requestAnimationFrame(frame);
     });
-    toc.appendChild(frag);
-    updateActiveHighlightSoon();
   }
 
-  function updateActiveHighlight() {
-    STATE.activeRaf = 0;
-    const toc = document.querySelector(`#${UI_ID} .chatgpt-nav-toc`);
-    if (!toc || !STATE.messages.length) return;
+  function settleAfterNavigation(targetTop, delay = 120) {
+    return new Promise((resolve) => {
+      clearTimeout(STATE.settleTimer);
+      STATE.settleTimer = window.setTimeout(() => {
+        STATE.lockedScrollTop = getScrollTop(getScrollRoot());
+        STATE.suppressRestoreUntil = now() + 100;
+        resolve(targetTop);
+      }, delay);
+    });
+  }
 
+  async function scrollElementToCenter(el) {
+    if (!(el instanceof Element) || !el.isConnected) return;
     const root = getScrollRoot();
-    const activeIndex = findNearestVisibleIndex(STATE.messages, root);
-    if (activeIndex < 0) return;
+    const targetTop = getTargetTopForCenter(el, root);
+    const distance = Math.abs(targetTop - getScrollTop(root));
+    const useNativeSmooth = distance <= Math.max(LONG_JUMP_PX, getViewportMetrics(root).height * 1.25);
+    const allowMs = useNativeSmooth ? 900 : 260;
 
-    STATE.currentIndex = activeIndex;
-    toc.querySelectorAll(".chatgpt-nav-toc-item").forEach((item, index) => {
-      const isActive = index === activeIndex;
-      item.style.background = isActive ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.04)";
-      item.style.borderColor = isActive ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.08)";
-      item.style.opacity = isActive ? "1" : "0.9";
-    });
-  }
-
-  function updateActiveHighlightSoon() {
-    if (STATE.activeRaf) return;
-    STATE.activeRaf = window.requestAnimationFrame(updateActiveHighlight);
-  }
-
-  function scanMessagesAndMaybeRender() {
-    STATE.scanTimer = null;
-    const nextMessages = queryUserMessages();
-    const sameLength = nextMessages.length === STATE.messages.length;
-    const sameOrder = sameLength && nextMessages.every((el, i) => el === STATE.messages[i]);
-
-    STATE.messages = nextMessages;
-    if (!sameOrder) {
-      STATE.currentIndex = -1;
-      renderTOC(true);
-    } else {
+    STATE.navInFlight = true;
+    try {
+      STATE.suppressRestoreUntil = now() + allowMs;
+      dispatchToPage("CHATGPT_NAV_ALLOW_SCROLL_ONCE", { ms: allowMs });
+      if (useNativeSmooth) {
+        setScrollTop(root, targetTop, "smooth");
+        await new Promise((resolve) => setTimeout(resolve, 220));
+      } else {
+        await fastScrollToTop(root, targetTop);
+      }
+      await settleAfterNavigation(targetTop, 120);
+    } finally {
+      STATE.navInFlight = false;
       renderTOC(false);
     }
   }
 
-  function scheduleScan() {
-    if (STATE.scanTimer) return;
-    STATE.scanTimer = window.setTimeout(scanMessagesAndMaybeRender, 120);
+  async function jump(dir) {
+    if (STATE.navInFlight) return;
+    if (!STATE.messages.length) refreshMessages();
+    if (!STATE.messages.length) return;
+
+    const root = getScrollRoot();
+    if (STATE.currentIndex < 0 || STATE.currentIndex >= STATE.messages.length) {
+      STATE.currentIndex = findNearestVisibleIndex(STATE.messages, root);
+    }
+    STATE.currentIndex = clamp(STATE.currentIndex + dir, 0, STATE.messages.length - 1);
+    await scrollElementToCenter(STATE.messages[STATE.currentIndex]);
+  }
+
+  async function jumpToIndex(index) {
+    if (!STATE.messages.length) refreshMessages();
+    if (!STATE.messages.length) return;
+    STATE.currentIndex = clamp(index, 0, STATE.messages.length - 1);
+    await scrollElementToCenter(STATE.messages[STATE.currentIndex]);
+  }
+
+  function refreshMessages() {
+    ensureUI();
+    STATE.messages = queryUserMessages();
+    renderTOC(false);
+  }
+
+  function scheduleScan(reason = "mutation", delay = 120) {
+    clearTimeout(STATE.scanTimer);
+    STATE.scanTimer = window.setTimeout(() => {
+      ensureUI();
+      refreshMessages();
+      if (!STATE.messages.length && STATE.bootRetries < 6) {
+        STATE.bootRetries += 1;
+        scheduleScan("retry", Math.min(1200, 180 + STATE.bootRetries * 160));
+      }
+      if (STATE.scrollLockEnabled && reason !== "nav") scheduleRestoreBurst();
+    }, delay);
+  }
+
+  function handlePossibleRouteChange() {
+    if (location.href === STATE.lastHref) return;
+    STATE.lastHref = location.href;
+    STATE.currentIndex = -1;
+    STATE.bootRetries = 0;
+    scheduleScan("nav", 180);
   }
 
   function installObservers() {
     if (STATE.observer) return;
 
-    STATE.observer = new MutationObserver(() => {
-      scheduleScan();
-      scheduleRestoreBurst();
-    });
-
-    STATE.observer.observe(document.documentElement || document.body, {
-      childList: true,
-      subtree: true,
-    });
-
-    window.addEventListener(
-      "scroll",
-      () => {
-        updateActiveHighlightSoon();
-        if (!STATE.scrollLockEnabled || STATE.navInFlight) return;
-        if (now() < STATE.suppressRestoreUntil) return;
-        if (now() < STATE.userScrollUntil) {
-          updateLockedPositionFromCurrent();
-          return;
+    STATE.observer = new MutationObserver((mutations) => {
+      let shouldScan = false;
+      for (const mutation of mutations) {
+        if (mutation.type !== "childList") continue;
+        if (mutation.addedNodes.length || mutation.removedNodes.length) {
+          shouldScan = true;
+          break;
         }
-        maybeRestoreScroll();
-      },
-      true
-    );
+      }
+      if (shouldScan) scheduleScan("mutation", 120);
+    });
+
+    const target = document.body || document.documentElement;
+    if (target) {
+      STATE.observer.observe(target, { childList: true, subtree: true });
+    }
+
+    window.addEventListener("scroll", () => {
+      renderTOC(false);
+      if (!STATE.scrollLockEnabled) return;
+      if (now() < STATE.suppressRestoreUntil) return;
+      if (now() < STATE.userScrollUntil) {
+        updateLockedPositionFromCurrent();
+        return;
+      }
+      maybeRestoreScroll();
+    }, true);
 
     window.addEventListener("wheel", () => setUserScrollIntent(1200), { capture: true, passive: true });
     window.addEventListener("touchmove", () => setUserScrollIntent(1200), { capture: true, passive: true });
-    window.addEventListener(
-      "mousedown",
-      () => setUserScrollIntent(800),
-      true
-    );
+    window.addEventListener("mousedown", () => setUserScrollIntent(800), true);
+    window.addEventListener("resize", () => renderTOC(false), { passive: true });
+    window.addEventListener("popstate", handlePossibleRouteChange, true);
+    window.addEventListener("hashchange", handlePossibleRouteChange, true);
 
-    window.addEventListener(
-      "keydown",
-      (event) => {
-        if (event.altKey && !event.shiftKey && event.key === "ArrowUp") {
-          event.preventDefault();
-          void jump(-1);
-          return;
-        }
-        if (event.altKey && !event.shiftKey && event.key === "ArrowDown") {
-          event.preventDefault();
-          void jump(1);
-          return;
-        }
-        if (event.altKey && !event.shiftKey && event.key.toLowerCase() === "l") {
-          event.preventDefault();
-          applyLockState(!STATE.scrollLockEnabled, true);
-          return;
-        }
-        if (USER_SCROLL_KEYS.has(event.key)) {
-          setUserScrollIntent(1200);
-        }
-      },
-      true
-    );
+    window.addEventListener("keydown", (event) => {
+      if (event.altKey && !event.shiftKey && event.key === "ArrowUp") {
+        event.preventDefault();
+        void jump(-1);
+        return;
+      }
+      if (event.altKey && !event.shiftKey && event.key === "ArrowDown") {
+        event.preventDefault();
+        void jump(1);
+        return;
+      }
+      if (event.altKey && !event.shiftKey && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        applyLockState(!STATE.scrollLockEnabled, true);
+        return;
+      }
+      if (USER_SCROLL_KEYS.has(event.key)) setUserScrollIntent(1200);
+    }, true);
 
-    window.addEventListener("popstate", scheduleScan, true);
-    window.addEventListener("resize", updateActiveHighlightSoon, { passive: true });
+    STATE.urlPollTimer = window.setInterval(handlePossibleRouteChange, 700);
   }
 
-  function ensureReady() {
-    if (STATE.initComplete) return;
-    buildUI();
+  function start() {
+    ensureUI();
     installObservers();
-    scanMessagesAndMaybeRender();
-    STATE.initComplete = true;
+    refreshMessages();
+    scheduleScan("boot", 250);
+    scheduleScan("boot", 900);
   }
 
   function init() {
     if (chrome?.storage?.local) {
       chrome.storage.local.get([STORAGE_KEY], (result) => {
         STATE.scrollLockEnabled = Boolean(result?.[STORAGE_KEY]);
-        ensureReady();
+        start();
       });
     } else {
-      ensureReady();
+      start();
     }
   }
 
