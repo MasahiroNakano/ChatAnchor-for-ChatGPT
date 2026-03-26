@@ -6,9 +6,8 @@
   const HOST_ID = "chatanchor-host";
   const PANEL_ID = "chatanchor-panel";
   const TOC_CHAR_LIMIT = 50;
-  const TOC_MIN_HEIGHT = 168;
-  const TOC_MAX_HEIGHT = 480;
-  const TOC_ITEM_HEIGHT = 36;
+  const TOC_MIN_HEIGHT = 240;
+  const TOC_ITEM_HEIGHT = 56;
   const PANEL_RESERVED_HEIGHT = 112;
   const PANEL_VIEWPORT_MARGIN = 40;
   const LONG_JUMP_PX = 1200;
@@ -187,10 +186,10 @@
 
     const viewportHeight = Math.max(window.innerHeight || 0, 320);
     const panelMaxHeight = Math.max(220, viewportHeight - PANEL_VIEWPORT_MARGIN);
-    const availableTOCHeight = Math.max(96, panelMaxHeight - PANEL_RESERVED_HEIGHT);
+    const availableTOCHeight = Math.max(120, panelMaxHeight - PANEL_RESERVED_HEIGHT);
     const minTOCHeight = Math.min(TOC_MIN_HEIGHT, availableTOCHeight);
     const desiredHeight = STATE.messages.length
-      ? clamp(STATE.messages.length * TOC_ITEM_HEIGHT, minTOCHeight, TOC_MAX_HEIGHT)
+      ? clamp(STATE.messages.length * TOC_ITEM_HEIGHT, minTOCHeight, availableTOCHeight)
       : minTOCHeight;
     const tocHeight = clamp(desiredHeight, minTOCHeight, availableTOCHeight);
 
@@ -221,8 +220,7 @@
         #${PANEL_ID} {
           pointer-events: auto;
           box-sizing: border-box;
-          width: 248px;
-          max-width: min(248px, calc(100vw - 32px));
+          width: min(340px, calc(100vw - 32px));
           display: flex;
           flex-direction: column;
           gap: 8px;
@@ -256,9 +254,8 @@
           display: flex;
           flex-direction: column;
           gap: 6px;
-          min-height: 96px;
+          min-height: 120px;
           height: ${TOC_MIN_HEIGHT}px;
-          max-height: ${TOC_MAX_HEIGHT}px;
           flex: 1 1 auto;
           overflow-y: auto;
           padding-right: 2px;
