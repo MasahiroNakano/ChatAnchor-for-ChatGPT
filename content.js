@@ -3,12 +3,16 @@
   window.__chatgptNavigatorInstalled = true;
 
   const STORAGE_KEY = "scrollLockEnabled";
+  const PANEL_SIZE_KEY = "panelSize";
   const HOST_ID = "chatanchor-host";
   const PANEL_ID = "chatanchor-panel";
   const TOC_CHAR_LIMIT = 50;
-  const TOC_MIN_HEIGHT = 240;
-  const TOC_ITEM_HEIGHT = 56;
-  const PANEL_RESERVED_HEIGHT = 112;
+  const TOC_MIN_HEIGHT = 120;
+  const PANEL_RESERVED_HEIGHT = 104;
+  const PANEL_DEFAULT_WIDTH = 340;
+  const PANEL_DEFAULT_HEIGHT = 360;
+  const PANEL_MIN_WIDTH = 260;
+  const PANEL_MIN_HEIGHT = TOC_MIN_HEIGHT + PANEL_RESERVED_HEIGHT;
   const PANEL_VIEWPORT_MARGIN = 40;
   const LONG_JUMP_PX = 1200;
   const USER_SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
@@ -29,6 +33,11 @@
     urlPollTimer: 0,
     lastHref: location.href,
     bootRetries: 0,
+    resizeSession: null,
+    panelSize: {
+      width: PANEL_DEFAULT_WIDTH,
+      height: PANEL_DEFAULT_HEIGHT,
+    },
     ui: {
       host: null,
       shadow: null,
@@ -36,6 +45,7 @@
       tocWrap: null,
       toc: null,
       lockBtn: null,
+      resizeHandle: null,
     },
   };
 
@@ -179,23 +189,109 @@
       .join("\n");
   }
 
+  function getPanelSizeBounds() {
+    const viewportWidth = Math.max(window.innerWidth || 0, 320);
+    const viewportHeight = Math.max(window.innerHeight || 0, 320);
+    const maxWidth = Math.max(PANEL_MIN_WIDTH, viewportWidth - 32);
+    const maxHeight = Math.max(PANEL_MIN_HEIGHT, viewportHeight - PANEL_VIEWPORT_MARGIN);
+
+    return {
+      minWidth: Math.min(PANEL_MIN_WIDTH, maxWidth),
+      maxWidth,
+      minHeight: Math.min(PANEL_MIN_HEIGHT, maxHeight),
+      maxHeight,
+    };
+  }
+
+  function normalizePanelSize(size = STATE.panelSize) {
+    const bounds = getPanelSizeBounds();
+    return {
+      width: clamp(Math.round(Number(size?.width) || PANEL_DEFAULT_WIDTH), bounds.minWidth, bounds.maxWidth),
+      height: clamp(Math.round(Number(size?.height) || PANEL_DEFAULT_HEIGHT), bounds.minHeight, bounds.maxHeight),
+    };
+  }
+
+  function applyPanelSize() {
+    const panel = STATE.ui.panel;
+    if (!(panel instanceof HTMLElement)) return;
+
+    const bounds = getPanelSizeBounds();
+    STATE.panelSize = normalizePanelSize(STATE.panelSize);
+    panel.style.width = `${STATE.panelSize.width}px`;
+    panel.style.height = `${STATE.panelSize.height}px`;
+    panel.style.maxWidth = `${bounds.maxWidth}px`;
+    panel.style.maxHeight = `${bounds.maxHeight}px`;
+  }
+
+  function persistPanelSize() {
+    if (!chrome?.storage?.local) return;
+    chrome.storage.local.set({ [PANEL_SIZE_KEY]: STATE.panelSize });
+  }
+
+  function stopPanelResize(event) {
+    const session = STATE.resizeSession;
+    if (!session) return;
+    if (event && event.pointerId !== session.pointerId) return;
+
+    window.removeEventListener("pointermove", handlePanelResizeMove, true);
+    window.removeEventListener("pointerup", stopPanelResize, true);
+    window.removeEventListener("pointercancel", stopPanelResize, true);
+    document.documentElement.style.cursor = session.prevCursor;
+    document.documentElement.style.userSelect = session.prevUserSelect;
+    if (STATE.ui.resizeHandle?.releasePointerCapture) {
+      try {
+        STATE.ui.resizeHandle.releasePointerCapture(session.pointerId);
+      } catch {}
+    }
+    STATE.resizeSession = null;
+    persistPanelSize();
+  }
+
+  function handlePanelResizeMove(event) {
+    const session = STATE.resizeSession;
+    if (!session || event.pointerId !== session.pointerId) return;
+
+    event.preventDefault();
+    STATE.panelSize = normalizePanelSize({
+      width: session.startWidth - (event.clientX - session.startX),
+      height: session.startHeight - (event.clientY - session.startY),
+    });
+    applyPanelSize();
+    updateTOCLayout();
+  }
+
+  function startPanelResize(event) {
+    if (!(STATE.ui.panel instanceof HTMLElement)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    applyPanelSize();
+    STATE.resizeSession = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: STATE.panelSize.width,
+      startHeight: STATE.panelSize.height,
+      prevCursor: document.documentElement.style.cursor,
+      prevUserSelect: document.documentElement.style.userSelect,
+    };
+    document.documentElement.style.cursor = "nwse-resize";
+    document.documentElement.style.userSelect = "none";
+    if (STATE.ui.resizeHandle?.setPointerCapture) {
+      try {
+        STATE.ui.resizeHandle.setPointerCapture(event.pointerId);
+      } catch {}
+    }
+    window.addEventListener("pointermove", handlePanelResizeMove, true);
+    window.addEventListener("pointerup", stopPanelResize, true);
+    window.addEventListener("pointercancel", stopPanelResize, true);
+  }
+
   function updateTOCLayout() {
     const panel = STATE.ui.panel;
-    const toc = STATE.ui.toc;
-    if (!(panel instanceof HTMLElement) || !(toc instanceof HTMLElement)) return;
+    if (!(panel instanceof HTMLElement)) return;
 
-    const viewportHeight = Math.max(window.innerHeight || 0, 320);
-    const panelMaxHeight = Math.max(220, viewportHeight - PANEL_VIEWPORT_MARGIN);
-    const availableTOCHeight = Math.max(120, panelMaxHeight - PANEL_RESERVED_HEIGHT);
-    const minTOCHeight = Math.min(TOC_MIN_HEIGHT, availableTOCHeight);
-    const desiredHeight = STATE.messages.length
-      ? clamp(STATE.messages.length * TOC_ITEM_HEIGHT, minTOCHeight, availableTOCHeight)
-      : minTOCHeight;
-    const tocHeight = clamp(desiredHeight, minTOCHeight, availableTOCHeight);
-
-    panel.style.maxHeight = `${panelMaxHeight}px`;
-    toc.style.height = `${tocHeight}px`;
-    toc.style.maxHeight = `${availableTOCHeight}px`;
+    applyPanelSize();
   }
 
   function ensureUI() {
@@ -220,7 +316,8 @@
         #${PANEL_ID} {
           pointer-events: auto;
           box-sizing: border-box;
-          width: min(340px, calc(100vw - 32px));
+          width: ${PANEL_DEFAULT_WIDTH}px;
+          height: ${PANEL_DEFAULT_HEIGHT}px;
           display: flex;
           flex-direction: column;
           gap: 8px;
@@ -234,6 +331,8 @@
           font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           color: white;
           overflow: hidden;
+          min-width: ${PANEL_MIN_WIDTH}px;
+          min-height: ${PANEL_MIN_HEIGHT}px;
           max-height: calc(100vh - ${PANEL_VIEWPORT_MARGIN}px);
         }
         .toc-wrap {
@@ -241,9 +340,19 @@
           flex-direction: column;
           gap: 6px;
           min-height: 0;
-          flex: 1 1 auto;
+          flex: 1 1 0;
+          overflow: hidden;
+        }
+        .panel-header {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex: 0 0 auto;
+          min-height: 18px;
         }
         .toc-label {
+          flex: 1 1 auto;
+          min-width: 0;
           color: rgba(255,255,255,0.86);
           font-size: 12px;
           font-weight: 700;
@@ -253,17 +362,22 @@
         .toc {
           display: flex;
           flex-direction: column;
+          align-items: stretch;
           gap: 6px;
-          min-height: 120px;
-          height: ${TOC_MIN_HEIGHT}px;
-          flex: 1 1 auto;
+          min-height: 0;
+          flex: 1 1 0;
           overflow-y: auto;
+          overflow-x: hidden;
           padding-right: 2px;
           scrollbar-gutter: stable;
+          overscroll-behavior: contain;
         }
         .toc-item {
           width: 100%;
           display: block;
+          box-sizing: border-box;
+          flex: 0 0 auto;
+          min-height: 33px;
           text-align: left;
           padding: 7px 9px;
           border-radius: 10px;
@@ -287,7 +401,31 @@
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 8px;
+          flex: 0 0 auto;
         }
+        .resize-handle {
+          display: block;
+          width: 16px;
+          height: 16px;
+          padding: 0;
+          border: 0;
+          border-radius: 4px;
+          appearance: none;
+          -webkit-appearance: none;
+          background-color: transparent;
+          background:
+            linear-gradient(135deg,
+              transparent 0 34%,
+              rgba(255,255,255,0.52) 34% 42%,
+              transparent 42% 56%,
+              rgba(255,255,255,0.52) 56% 64%,
+              transparent 64% 100%);
+          cursor: nwse-resize;
+          opacity: 0.72;
+          touch-action: none;
+          flex: 0 0 auto;
+        }
+        .resize-handle:hover { opacity: 1; }
         .btn {
           min-width: 0;
           height: 38px;
@@ -303,6 +441,7 @@
         .btn:hover { background: rgba(255,255,255,0.16); }
         .btn:active { transform: translateY(1px); }
         .empty {
+          flex: 0 0 auto;
           color: rgba(255,255,255,0.7);
           font-size: 12px;
           line-height: 1.4;
@@ -311,7 +450,10 @@
       </style>
       <div id="${PANEL_ID}">
         <div class="toc-wrap">
-          <div class="toc-label">Your prompts</div>
+          <div class="panel-header">
+            <button class="resize-handle" type="button" title="Resize navigator" aria-label="Resize navigator"></button>
+            <div class="toc-label">Your prompts</div>
+          </div>
           <div class="toc"></div>
         </div>
         <div class="buttons">
@@ -328,13 +470,16 @@
     STATE.ui.tocWrap = shadow.querySelector(".toc-wrap");
     STATE.ui.toc = shadow.querySelector(".toc");
     STATE.ui.lockBtn = shadow.querySelector(".lock");
+    STATE.ui.resizeHandle = shadow.querySelector(".resize-handle");
 
     shadow.querySelector(".up")?.addEventListener("click", () => { void jump(-1); });
     shadow.querySelector(".down")?.addEventListener("click", () => { void jump(1); });
     STATE.ui.lockBtn?.addEventListener("click", () => {
       applyLockState(!STATE.scrollLockEnabled, true);
     });
+    STATE.ui.resizeHandle?.addEventListener("pointerdown", startPanelResize);
 
+    applyPanelSize();
     applyLockState(STATE.scrollLockEnabled, false);
     renderTOC(true);
   }
@@ -613,7 +758,10 @@
     window.addEventListener("wheel", () => setUserScrollIntent(1200), { capture: true, passive: true });
     window.addEventListener("touchmove", () => setUserScrollIntent(1200), { capture: true, passive: true });
     window.addEventListener("mousedown", () => setUserScrollIntent(800), true);
-    window.addEventListener("resize", () => renderTOC(false), { passive: true });
+    window.addEventListener("resize", () => {
+      applyPanelSize();
+      renderTOC(false);
+    }, { passive: true });
     window.addEventListener("popstate", handlePossibleRouteChange, true);
     window.addEventListener("hashchange", handlePossibleRouteChange, true);
 
@@ -649,8 +797,9 @@
 
   function init() {
     if (chrome?.storage?.local) {
-      chrome.storage.local.get([STORAGE_KEY], (result) => {
+      chrome.storage.local.get([STORAGE_KEY, PANEL_SIZE_KEY], (result) => {
         STATE.scrollLockEnabled = Boolean(result?.[STORAGE_KEY]);
+        STATE.panelSize = normalizePanelSize(result?.[PANEL_SIZE_KEY]);
         start();
       });
     } else {
