@@ -4,6 +4,7 @@
 
   const STORAGE_KEY = "scrollLockEnabled";
   const PANEL_SIZE_KEY = "panelSize";
+  const PANEL_MINIMIZED_KEY = "panelMinimized";
   const HOST_ID = "chatanchor-host";
   const PANEL_ID = "chatanchor-panel";
   const TOC_CHAR_LIMIT = 50;
@@ -34,6 +35,7 @@
     lastHref: location.href,
     bootRetries: 0,
     resizeSession: null,
+    panelMinimized: false,
     panelSize: {
       width: PANEL_DEFAULT_WIDTH,
       height: PANEL_DEFAULT_HEIGHT,
@@ -45,6 +47,7 @@
       tocWrap: null,
       toc: null,
       lockBtn: null,
+      minimizeBtn: null,
       resizeHandle: null,
     },
   };
@@ -211,21 +214,70 @@
     };
   }
 
+  function updateHostPosition() {
+    const host = STATE.ui.host;
+    if (!(host instanceof HTMLElement)) return;
+
+    let bottomInset = 20;
+    const rightInset = window.innerWidth <= 900 ? 12 : 20;
+
+    if (!STATE.panelMinimized && window.innerWidth <= 900) {
+      const composer =
+        document.querySelector("form") ||
+        document.querySelector("textarea")?.closest("form") ||
+        document.querySelector("textarea");
+      if (composer instanceof Element && isElementVisible(composer)) {
+        const rect = composer.getBoundingClientRect();
+        if (rect.top < window.innerHeight && rect.bottom > 0) {
+          bottomInset = Math.max(bottomInset, Math.round(window.innerHeight - rect.top + 12));
+        }
+      }
+    }
+
+    host.style.right = `${rightInset}px`;
+    host.style.bottom = `${bottomInset}px`;
+  }
+
   function applyPanelSize() {
     const panel = STATE.ui.panel;
     if (!(panel instanceof HTMLElement)) return;
 
     const bounds = getPanelSizeBounds();
     STATE.panelSize = normalizePanelSize(STATE.panelSize);
-    panel.style.width = `${STATE.panelSize.width}px`;
-    panel.style.height = `${STATE.panelSize.height}px`;
+    panel.classList.toggle("minimized", STATE.panelMinimized);
+    panel.style.width = STATE.panelMinimized ? "auto" : `${STATE.panelSize.width}px`;
+    panel.style.height = STATE.panelMinimized ? "auto" : `${STATE.panelSize.height}px`;
+    panel.style.minWidth = STATE.panelMinimized ? "0px" : `${bounds.minWidth}px`;
+    panel.style.minHeight = STATE.panelMinimized ? "0px" : `${PANEL_MIN_HEIGHT}px`;
     panel.style.maxWidth = `${bounds.maxWidth}px`;
     panel.style.maxHeight = `${bounds.maxHeight}px`;
+    updateHostPosition();
   }
 
   function persistPanelSize() {
     if (!chrome?.storage?.local) return;
     chrome.storage.local.set({ [PANEL_SIZE_KEY]: STATE.panelSize });
+  }
+
+  function persistPanelMinimized() {
+    if (!chrome?.storage?.local) return;
+    chrome.storage.local.set({ [PANEL_MINIMIZED_KEY]: STATE.panelMinimized });
+  }
+
+  function updateMinimizeButton() {
+    const btn = STATE.ui.minimizeBtn;
+    if (!(btn instanceof HTMLElement)) return;
+    btn.textContent = STATE.panelMinimized ? "+" : "-";
+    btn.title = STATE.panelMinimized ? "Restore prompt navigator" : "Minimize prompt navigator";
+    btn.setAttribute("aria-pressed", String(STATE.panelMinimized));
+    btn.setAttribute("aria-label", btn.title);
+  }
+
+  function togglePanelMinimized(force, persist = true) {
+    STATE.panelMinimized = typeof force === "boolean" ? force : !STATE.panelMinimized;
+    updateMinimizeButton();
+    applyPanelSize();
+    if (persist) persistPanelMinimized();
   }
 
   function stopPanelResize(event) {
@@ -403,6 +455,20 @@
           gap: 8px;
           flex: 0 0 auto;
         }
+        .panel-toggle {
+          width: 22px;
+          height: 22px;
+          padding: 0;
+          border-radius: 6px;
+          border: 1px solid rgba(255,255,255,0.16);
+          background: rgba(255,255,255,0.08);
+          color: white;
+          font-size: 14px;
+          line-height: 1;
+          cursor: pointer;
+          flex: 0 0 auto;
+        }
+        .panel-toggle:hover { background: rgba(255,255,255,0.16); }
         .resize-handle {
           display: block;
           width: 16px;
@@ -426,6 +492,40 @@
           flex: 0 0 auto;
         }
         .resize-handle:hover { opacity: 1; }
+        #${PANEL_ID}.minimized .toc {
+          display: none;
+        }
+        #${PANEL_ID}.minimized .buttons {
+          display: none;
+        }
+        #${PANEL_ID}.minimized {
+          width: auto;
+          height: auto;
+          min-width: 0;
+          min-height: 0;
+          padding: 0;
+          gap: 0;
+          border-radius: 999px;
+        }
+        #${PANEL_ID}.minimized .toc-wrap {
+          flex: 0 0 auto;
+          overflow: visible;
+        }
+        #${PANEL_ID}.minimized .panel-header {
+          min-height: 0;
+          gap: 0;
+        }
+        #${PANEL_ID}.minimized .toc-label {
+          display: none;
+        }
+        #${PANEL_ID}.minimized .resize-handle {
+          display: none;
+        }
+        #${PANEL_ID}.minimized .panel-toggle {
+          width: 30px;
+          height: 30px;
+          border-radius: 999px;
+        }
         .btn {
           min-width: 0;
           height: 38px;
@@ -453,6 +553,7 @@
           <div class="panel-header">
             <button class="resize-handle" type="button" title="Resize navigator" aria-label="Resize navigator"></button>
             <div class="toc-label">Your prompts</div>
+            <button class="panel-toggle" type="button" title="Minimize prompt navigator" aria-label="Minimize prompt navigator">-</button>
           </div>
           <div class="toc"></div>
         </div>
@@ -470,6 +571,7 @@
     STATE.ui.tocWrap = shadow.querySelector(".toc-wrap");
     STATE.ui.toc = shadow.querySelector(".toc");
     STATE.ui.lockBtn = shadow.querySelector(".lock");
+    STATE.ui.minimizeBtn = shadow.querySelector(".panel-toggle");
     STATE.ui.resizeHandle = shadow.querySelector(".resize-handle");
 
     shadow.querySelector(".up")?.addEventListener("click", () => { void jump(-1); });
@@ -477,8 +579,12 @@
     STATE.ui.lockBtn?.addEventListener("click", () => {
       applyLockState(!STATE.scrollLockEnabled, true);
     });
+    STATE.ui.minimizeBtn?.addEventListener("click", () => {
+      togglePanelMinimized(undefined, true);
+    });
     STATE.ui.resizeHandle?.addEventListener("pointerdown", startPanelResize);
 
+    updateMinimizeButton();
     applyPanelSize();
     applyLockState(STATE.scrollLockEnabled, false);
     renderTOC(true);
@@ -797,9 +903,10 @@
 
   function init() {
     if (chrome?.storage?.local) {
-      chrome.storage.local.get([STORAGE_KEY, PANEL_SIZE_KEY], (result) => {
+      chrome.storage.local.get([STORAGE_KEY, PANEL_SIZE_KEY, PANEL_MINIMIZED_KEY], (result) => {
         STATE.scrollLockEnabled = Boolean(result?.[STORAGE_KEY]);
         STATE.panelSize = normalizePanelSize(result?.[PANEL_SIZE_KEY]);
+        STATE.panelMinimized = Boolean(result?.[PANEL_MINIMIZED_KEY]);
         start();
       });
     } else {
