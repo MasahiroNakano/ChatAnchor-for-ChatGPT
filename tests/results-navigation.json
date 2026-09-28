@@ -1,0 +1,391 @@
+{
+  "scope": "Local synthetic DOM; CDP isolated-world JS, not a logged-in ChatGPT test; manifest installation and storage not tested.",
+  "browser": "144.0.7559.96",
+  "group": "navigation",
+  "passed": 56,
+  "total": 56,
+  "tests": [
+    {
+      "name": "normal-prompt-5-aligned",
+      "passed": true,
+      "data": {
+        "scrollTop": 1066,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5300
+      }
+    },
+    {
+      "name": "normal-next",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "normal-shortcut-prev",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "normal-follow-does-not-pin",
+      "passed": true,
+      "data": {
+        "actual": 5300,
+        "expected": 5300
+      }
+    },
+    {
+      "name": "normal-single-navigation-write",
+      "passed": true,
+      "data": [
+        {
+          "ms": 0.1,
+          "reason": "navigate-signed",
+          "root": "e1",
+          "before": 1066,
+          "requested": 766,
+          "actual": 766
+        }
+      ]
+    },
+    {
+      "name": "normal-diagnostic-no-content",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "normal-page-APIs-untouched",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "normal-isolated-world",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "normal-no-page-errors",
+      "passed": true,
+      "data": []
+    },
+    {
+      "name": "reverse-prompt-5-aligned",
+      "passed": true,
+      "data": {
+        "scrollTop": -4234,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5300
+      }
+    },
+    {
+      "name": "reverse-negative-preserved",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-next",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-shortcut-prev",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-follow-does-not-pin",
+      "passed": true,
+      "data": {
+        "actual": 0,
+        "expected": 0
+      }
+    },
+    {
+      "name": "reverse-single-navigation-write",
+      "passed": true,
+      "data": [
+        {
+          "ms": 0.1,
+          "reason": "navigate-signed",
+          "root": "e1",
+          "before": -4234,
+          "requested": -4534,
+          "actual": -4534
+        }
+      ]
+    },
+    {
+      "name": "reverse-diagnostic-no-content",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-page-APIs-untouched",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-isolated-world",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-no-page-errors",
+      "passed": true,
+      "data": []
+    },
+    {
+      "name": "window-prompt-5-aligned",
+      "passed": true,
+      "data": {
+        "scrollTop": 1044,
+        "targetTop": 176,
+        "height": 800,
+        "range": 5200
+      }
+    },
+    {
+      "name": "window-next",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "window-shortcut-prev",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "window-follow-does-not-pin",
+      "passed": true,
+      "data": {
+        "actual": 5200,
+        "expected": 5200
+      }
+    },
+    {
+      "name": "window-single-navigation-write",
+      "passed": true,
+      "data": [
+        {
+          "ms": 0.2,
+          "reason": "navigate-signed",
+          "root": "e1",
+          "before": 1044,
+          "requested": 744,
+          "actual": 744
+        }
+      ]
+    },
+    {
+      "name": "window-diagnostic-no-content",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "window-page-APIs-untouched",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "window-isolated-world",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "window-no-page-errors",
+      "passed": true,
+      "data": []
+    },
+    {
+      "name": "hidden-fallback-prompt-5-aligned",
+      "passed": true,
+      "data": {
+        "scrollTop": 1066,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5300
+      }
+    },
+    {
+      "name": "hidden-fallback-next",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "hidden-fallback-shortcut-prev",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "hidden-fallback-follow-does-not-pin",
+      "passed": true,
+      "data": {
+        "actual": 5300,
+        "expected": 5300
+      }
+    },
+    {
+      "name": "hidden-fallback-single-navigation-write",
+      "passed": true,
+      "data": [
+        {
+          "ms": 0.2,
+          "reason": "navigate-signed",
+          "root": "e1",
+          "before": 1066,
+          "requested": 766,
+          "actual": 766
+        }
+      ]
+    },
+    {
+      "name": "hidden-fallback-diagnostic-no-content",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "hidden-fallback-page-APIs-untouched",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "hidden-fallback-isolated-world",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "hidden-fallback-no-page-errors",
+      "passed": true,
+      "data": []
+    },
+    {
+      "name": "reverse-unmarked-prompt-5-aligned",
+      "passed": true,
+      "data": {
+        "scrollTop": -4234,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5300
+      }
+    },
+    {
+      "name": "reverse-unmarked-negative-preserved",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-unmarked-next",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-unmarked-shortcut-prev",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-unmarked-follow-does-not-pin",
+      "passed": true,
+      "data": {
+        "actual": 0,
+        "expected": 0
+      }
+    },
+    {
+      "name": "reverse-unmarked-single-navigation-write",
+      "passed": true,
+      "data": [
+        {
+          "ms": 0.2,
+          "reason": "navigate-signed",
+          "root": "e1",
+          "before": -4234,
+          "requested": -4534,
+          "actual": -4534
+        }
+      ]
+    },
+    {
+      "name": "reverse-unmarked-diagnostic-no-content",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-unmarked-page-APIs-untouched",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-unmarked-isolated-world",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-unmarked-no-page-errors",
+      "passed": true,
+      "data": []
+    },
+    {
+      "name": "legacy-prompt-5-aligned",
+      "passed": true,
+      "data": {
+        "scrollTop": 1066,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5300
+      }
+    },
+    {
+      "name": "legacy-next",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "legacy-shortcut-prev",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "legacy-follow-does-not-pin",
+      "passed": true,
+      "data": {
+        "actual": 5300,
+        "expected": 5300
+      }
+    },
+    {
+      "name": "legacy-single-navigation-write",
+      "passed": true,
+      "data": [
+        {
+          "ms": 0.3,
+          "reason": "navigate-signed",
+          "root": "e1",
+          "before": 1066,
+          "requested": 766,
+          "actual": 766
+        }
+      ]
+    },
+    {
+      "name": "legacy-diagnostic-no-content",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "legacy-page-APIs-untouched",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "legacy-isolated-world",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "legacy-no-page-errors",
+      "passed": true,
+      "data": []
+    }
+  ]
+}

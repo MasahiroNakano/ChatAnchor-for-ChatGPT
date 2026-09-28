@@ -1,0 +1,46 @@
+{
+  "scope": "Synthetic static DOM only. No ChatGPT JavaScript or forced-bottom page controller. Both extensions executed in isolated worlds.",
+  "browser": "144.0.7559.96",
+  "results": [
+    {
+      "layout": "normal-top-origin",
+      "extension": "2.0.3",
+      "afterClick": {
+        "scrollTop": 882,
+        "targetTop": 338,
+        "viewport": 700
+      }
+    },
+    {
+      "layout": "normal-top-origin",
+      "extension": "3.0.0",
+      "afterClick": {
+        "scrollTop": 1066,
+        "targetTop": 154,
+        "viewport": 700
+      }
+    },
+    {
+      "layout": "bottom-origin-column-reverse",
+      "extension": "2.0.3",
+      "afterClick": {
+        "scrollTop": 0,
+        "targetTop": -4080,
+        "viewport": 700
+      },
+      "externalWriteRequested": -1000,
+      "after300ms": 0
+    },
+    {
+      "layout": "bottom-origin-column-reverse",
+      "extension": "3.0.0",
+      "afterClick": {
+        "scrollTop": -4234,
+        "targetTop": 154,
+        "viewport": 700
+      },
+      "externalWriteRequested": -1000,
+      "after300ms": -1000
+    }
+  ]
+}

@@ -1,64 +1,73 @@
-# ChatGPT Navigator + Stay v2
+# ChatGPT Navigator + Stay 3.0.0
 
-A small Chrome extension for long ChatGPT conversations.
+質問の目次・質問間移動・明示的なStayを提供するChrome拡張です。負のスクロール座標に対応し、v2系の「Followでも移動先を固定し続ける処理」を撤去しました。
 
-## What it does
+## 今回分かったこと
 
-- Builds a table of contents from **your prompts** in the current conversation.
-- Click a prompt to jump to it.
-- `▲` / `▼` move to the previous / next prompt.
-- **Stay** keeps the reading position stable while ChatGPT streams, re-renders, or tries to follow the newest output.
-- **Follow** disables that protection and leaves scrolling to ChatGPT.
-- The active prompt is highlighted as you scroll.
-- The panel is isolated in a Shadow DOM so ChatGPT's CSS is less likely to break it.
+下端を原点とする `column-reverse` のスクロール領域では、最下部が `scrollTop = 0`、上の位置が負の値になります。v2.0.3は移動先を `[0, 最大値]` に制限していたため、この構造で上へ移動しようとすると拡張自身が最下部の0を書いていました。ChatGPT側の自動スクロール処理を入れない静的な再現ページでも確認しました。
 
-## Keyboard shortcuts
+ただし、利用者のログイン済みChatGPT画面の実測はできていません。「旧版にこの欠陥があり、症状を再現できる」ことと「すべての実環境でこれだけが原因」なのは別です。詳しい比較・実測値は [ROOT-CAUSE.md](ROOT-CAUSE.md) に記載しています。
 
-- `Alt + Up` — previous prompt
-- `Alt + Down` — next prompt
-- `Alt + L` — toggle Stay / Follow
+## 導入
 
-## Install
+1. 以前のChatGPT Navigator / Stay拡張を無効にします。同時に有効にしないでください。
+2. ZIPを展開します。
+3. Chromeで `chrome://extensions` を開き、デベロッパーモードを有効にします。
+4. 「パッケージ化されていない拡張機能を読み込む」で、`manifest.json` が入った `chatgpt-nav-extension_v3_0_0` フォルダを選びます。
+5. ChatGPTのタブを再読み込みします。パネルに「Navigator 3.0」と表示されます。
 
-1. Unzip the extension folder.
-2. Open `chrome://extensions`.
-3. Turn on **Developer mode**.
-4. Click **Load unpacked**.
-5. Select the folder containing `manifest.json`.
-6. Reload any already-open `chatgpt.com` tabs once.
+最初は **Follow** で起動します。v2の設定を引き継がず、Stayの影響を分離します。まずFollowのまま目次の上の質問をクリックして移動を確認してください。Chrome拡張の読み込みにはNode.js・Python・ビルド作業は不要です。
 
-## v2 design changes
+Chrome公式の導入・更新説明: https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world
 
-The old version patched page-level functions such as `window.scrollTo()` and `scrollIntoView()`. That depended on how ChatGPT happened to implement auto-scrolling.
+## 操作
 
-v2 does **not** patch ChatGPT's JavaScript. When Stay is enabled it:
+- 目次クリック: その質問へ移動します。通常は表示領域の上から約22%の位置を目安にします。端ではブラウザが実際の移動可能範囲に収めます。
+- ▲ / ▼、または `Alt + ↑ / ↓`: 前後の質問へ移動します。
+- Stay / Follow、または `Alt + L`: 読書位置の保持を切り替えます。
+- 「診断をコピー」: 最後の移動前後の状態をコピーします。クリップボード書き込みが使えない場合は、選択・コピーできるテキスト欄が開きます。
 
-1. Chooses a stable conversation turn near the current reading position.
-2. Remembers that turn's exact screen position.
-3. If ChatGPT streams, re-renders, changes layout, or changes scroll position, v2 moves the conversation scroller just enough to put that same turn back at the same screen position.
-4. When you deliberately scroll, v2 waits for your scrolling to settle and records the new reading position instead.
+## 設計
 
-This makes Stay depend less on ChatGPT's internal scrolling implementation.
+**移動と位置固定を別の機能にしました。** 通常の移動は、対象の表示位置から符号付きの移動先を計算し、原則1回だけスクロールします。負の値を0へ丸めません。移動直後の要素の高さや位置が実際に変わった場合のみ、80ms・220ms時点で最大2回補正します。ページがスクロール位置だけを変えても、それを理由にFollowで追い戻す処理はありません。
 
-## DOM compatibility strategy
+**Followは位置を固定しません。** ChatGPTや別の拡張が移動後に別の位置へスクロールする場合、それと競り合う無期限のループは設けていません。
 
-Prompt detection uses several signals, including:
+**Stayは明示的にオンにした場合だけ動作します。** 読んでいる要素の画面上の位置を保持します。ホイール・タッチ・スクロールキーなどの手動操作後は、新しい位置を保持します。レイアウト変化とスクロール命令の競合を区別し、短時間に競合が続く場合はFollowへ戻して通知します。これは無制限のスクロール阻止機能ではありません。
 
-- `data-turn-key` + `data-user-message-bubble` (newer renderer)
-- `data-testid="conversation-turn-*"` / `data-turn="user"` (older/alternate renderer)
-- `data-message-author-role="user"`
-- `data-conversation-role="user"`
-- older fallback role attributes
+ページ側の `scrollTop`、`scrollTo`、`scrollIntoView` やプロトタイプを差し替えません。疑似ホイールイベントも送りません。ページのReact内部状態や非公開APIにはアクセスしません。
 
-The selectors are centralized near the top of `content.js` under `SELECTORS`.
+## 同じ症状が残ったとき
 
-## Privacy
+Followで対象の質問をクリックし、約2秒後に「診断をコピー」を押して結果を共有してください。新たな移動をすると、前の移動記録は置き換わります。
 
-- No network requests are made by the extension.
-- Chat text is not sent anywhere.
-- Prompt text is cached only in memory for the currently open conversation and is cleared when the route changes.
-- Only the Stay / Follow preference is saved in `chrome.storage.local`.
+記録には、スクロール領域のスタイル・移動前後の `scrollTop`・拡張が要求した座標と直後の実測座標・対象の表示位置・匿名化した要素番号・フォーカスとスクロールの観測結果を含みます。負の座標方式か、移動要求が反映されたか、その後に位置やレイアウトが変わったかを切り分けるためのものです。
 
-## If ChatGPT changes again
+**会話本文・質問の文面・会話URL・会話ID・メッセージID・入力内容・認証情報は診断に含めません。** 質問の件数や選択した質問の番号、画面の寸法は含みます。自動送信はありません。
 
-If the panel appears but shows `0` prompts, inspect a user prompt in DevTools and check which stable role/turn attributes are present. Update the `SELECTORS` object near the top of `content.js`; the rest of the navigation and Stay logic should normally not need to change.
+診断は拡張自身の書き込みと画面の変化を観測するものです。他のスクリプトの呼び出し元・スタックトレースを特定する機能ではなく、あらゆる原因がこの記録だけで判明する保証はありません。
+
+## データの扱い
+
+目次表示のため、ページに存在する質問の文字列をタブ内メモリに保持します。この実装に外部送信・解析サービス・リモートコードの読み込みはありません。Chrome storageに保存するのはStayのオン／オフだけです。診断は利用者が操作したときだけクリップボードまたはテキスト欄へ出します。Manifestの権限は `storage` とChatGPTページでのcontent script実行です。
+
+## 検証範囲と制限
+
+ローカルChromiumの疑似DOM上で84チェックが通過しました。通常／下端基準の座標、旧／新のメッセージマーカー、Stay、手動ホイール操作、回答伸長、限定的なDOM差し替えなどを確認しています。結果は `tests/results-*.json`、旧版比較は `tests/v203-v3-comparison.json` です。
+
+実際のログイン済みChatGPT画面での動作、Chromeへの拡張インストールを含めた一連の動作、Chrome storageの実環境動作、実際のSPAでの会話切り替えは未検証です。content scriptはCDPの隔離実行環境で動かしており、ページの通常JavaScriptとは分離してテストしています。
+
+画面外の質問の外枠が残っていれば、内容が一時的に消えていても既存の目次を保持します。ただし、外枠ごとDOMからなくなった質問や、まだ読み込まれていない履歴を非公開APIから取得する機能はありません。対象の表示領域が見つからない場合は、位置を推測して強制移動せず通知します。ChatGPTのすべての表示構成や将来の変更に対応する保証はありません。
+
+## 開発・再検証
+
+拡張の利用には不要です。Python 3、Playwright、およびChromiumがある検証環境で実行します。既定のブラウザパスは `/usr/bin/chromium` です。`browser_tests.py` は環境変数 `CHROMIUM` で変更できます。
+
+```sh
+python tests/browser_tests.py navigation
+python tests/browser_tests.py stay
+python tests/browser_tests.py extra
+python tests/compare_v203.py /path/to/chatgpt-nav-extension-v2.0.3.zip
+```
+
+比較スクリプトでは旧ZIPを読み取り、v2.0.3とv3を同じ静的ページで動かします。旧ZIP自体はこの配布物に含めていません。各スクリプトは結果JSONを上書きします。

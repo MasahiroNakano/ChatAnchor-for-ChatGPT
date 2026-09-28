@@ -1,14 +1,12 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Navigator + Stay",
-  "version": "2.0.0",
-  "description": "Navigate between your prompts and keep your reading position stable while ChatGPT updates the conversation.",
+  "version": "3.0.0",
+  "description": "質問ごとの移動と読書位置の保持。負のスクロール座標に対応し、移動結果を診断できます。",
   "permissions": ["storage"],
-  "content_scripts": [
-    {
-      "matches": ["https://chatgpt.com/*", "https://www.chatgpt.com/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ]
+  "content_scripts": [{
+    "matches": ["https://chatgpt.com/*", "https://www.chatgpt.com/*"],
+    "js": ["scroll-core.js", "content.js"],
+    "run_at": "document_idle"
+  }]
 }

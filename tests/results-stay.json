@@ -1,0 +1,191 @@
+{
+  "scope": "Local synthetic DOM; CDP isolated-world JS, not a logged-in ChatGPT test; manifest installation and storage not tested.",
+  "browser": "144.0.7559.96",
+  "group": "stay",
+  "passed": 16,
+  "total": 16,
+  "tests": [
+    {
+      "name": "normal-stay-bottom-growth",
+      "passed": true,
+      "data": {
+        "before": {
+          "scrollTop": 1066,
+          "targetTop": 154,
+          "height": 700,
+          "range": 5300
+        },
+        "after": {
+          "scrollTop": 1066,
+          "targetTop": 154,
+          "height": 700,
+          "range": 5500
+        }
+      }
+    },
+    {
+      "name": "normal-stay-above-growth",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "normal-stay-explicit-restore",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "normal-stay-allows-user-wheel",
+      "passed": true,
+      "data": {
+        "before": {
+          "scrollTop": 1216,
+          "targetTop": 154,
+          "height": 700,
+          "range": 5650
+        },
+        "wheel": {
+          "scrollTop": 1426,
+          "targetTop": -56,
+          "height": 700,
+          "range": 5650
+        },
+        "stable": {
+          "scrollTop": 1426,
+          "targetTop": -56,
+          "height": 700,
+          "range": 5650
+        }
+      }
+    },
+    {
+      "name": "normal-stay-continuous-streaming",
+      "passed": true,
+      "data": {
+        "pressed": "true",
+        "before": {
+          "scrollTop": 1426,
+          "targetTop": -56,
+          "height": 700,
+          "range": 5650
+        },
+        "after": {
+          "scrollTop": 1426,
+          "targetTop": -56,
+          "height": 700,
+          "range": 5770
+        }
+      }
+    },
+    {
+      "name": "normal-stay-rapid-jump",
+      "passed": true,
+      "data": {
+        "scrollTop": 616,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5770
+      }
+    },
+    {
+      "name": "normal-stay-off-release",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "normal-stay-no-errors",
+      "passed": true,
+      "data": []
+    },
+    {
+      "name": "reverse-stay-bottom-growth",
+      "passed": true,
+      "data": {
+        "before": {
+          "scrollTop": -4234,
+          "targetTop": 154,
+          "height": 700,
+          "range": 5300
+        },
+        "after": {
+          "scrollTop": -4434,
+          "targetTop": 154,
+          "height": 700,
+          "range": 5500
+        }
+      }
+    },
+    {
+      "name": "reverse-stay-above-growth",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-stay-explicit-restore",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-stay-allows-user-wheel",
+      "passed": true,
+      "data": {
+        "before": {
+          "scrollTop": -4434,
+          "targetTop": 154,
+          "height": 700,
+          "range": 5650
+        },
+        "wheel": {
+          "scrollTop": -4224,
+          "targetTop": -56,
+          "height": 700,
+          "range": 5650
+        },
+        "stable": {
+          "scrollTop": -4224,
+          "targetTop": -56,
+          "height": 700,
+          "range": 5650
+        }
+      }
+    },
+    {
+      "name": "reverse-stay-continuous-streaming",
+      "passed": true,
+      "data": {
+        "pressed": "true",
+        "before": {
+          "scrollTop": -4224,
+          "targetTop": -56,
+          "height": 700,
+          "range": 5650
+        },
+        "after": {
+          "scrollTop": -4344,
+          "targetTop": -56,
+          "height": 700,
+          "range": 5770
+        }
+      }
+    },
+    {
+      "name": "reverse-stay-rapid-jump",
+      "passed": true,
+      "data": {
+        "scrollTop": -5154,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5770
+      }
+    },
+    {
+      "name": "reverse-stay-off-release",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "reverse-stay-no-errors",
+      "passed": true,
+      "data": []
+    }
+  ]
+}

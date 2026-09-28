@@ -1,0 +1,104 @@
+{
+  "scope": "Local synthetic DOM; CDP isolated-world JS, not a logged-in ChatGPT test; manifest installation and storage not tested.",
+  "browser": "144.0.7559.96",
+  "group": "extra",
+  "passed": 12,
+  "total": 12,
+  "tests": [
+    {
+      "name": "signed-core-fractional-write",
+      "passed": true,
+      "data": {
+        "before": 0,
+        "requested": -1234.5,
+        "actual": -1235
+      }
+    },
+    {
+      "name": "signed-core-native-lower-clamp",
+      "passed": true,
+      "data": {
+        "before": -1235,
+        "requested": -999999,
+        "actual": -5300
+      }
+    },
+    {
+      "name": "virtual-shell-index-retained",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "virtual-shell-navigation",
+      "passed": true,
+      "data": 154
+    },
+    {
+      "name": "virtual-shell-remount-index",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "bounded-layout-correction",
+      "passed": true,
+      "data": {
+        "scrollTop": -4404,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5470
+      }
+    },
+    {
+      "name": "bounded-layout-write-count",
+      "passed": true,
+      "data": [
+        {
+          "ms": 0.4,
+          "reason": "navigate-signed",
+          "root": "e1",
+          "before": -4254,
+          "requested": -4234,
+          "actual": -4234
+        },
+        {
+          "ms": 80.8,
+          "reason": "layout-change-only",
+          "root": "e1",
+          "before": -4234,
+          "requested": -4404,
+          "actual": -4404
+        }
+      ]
+    },
+    {
+      "name": "branch-removal-no-ghost",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "new-prompt-detected",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "zero-height-target-not-guessed",
+      "passed": true,
+      "data": null
+    },
+    {
+      "name": "extra-no-errors",
+      "passed": true,
+      "data": []
+    },
+    {
+      "name": "nested-root-not-all-ancestors",
+      "passed": true,
+      "data": {
+        "scrollTop": -4234,
+        "targetTop": 154,
+        "height": 700,
+        "range": 5300
+      }
+    }
+  ]
+}

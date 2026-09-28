@@ -1,53 +1,106 @@
 (() => {
-  if (window.__chatgptNavigatorBridgeInstalled) return;
-  window.__chatgptNavigatorBridgeInstalled = true;
+  "use strict";
 
-  let lockEnabled = false;
-  let allowUntil = 0;
+  if (globalThis.__chatgptNavigatorPageGuardV202Installed) return;
+  globalThis.__chatgptNavigatorPageGuardV202Installed = true;
 
-  const now = () => Date.now();
-  const allowOnce = (ms = 800) => {
-    allowUntil = Math.max(allowUntil, now() + ms);
-  };
-  const shouldBlock = () => lockEnabled && now() > allowUntil;
+  const GUARD_ATTR = "data-cgn-scroll-guard-v202";
+  const STATE_EVENT = "CGN_SCROLL_GUARD_V202_STATE";
+  let enabled = false;
 
-  window.addEventListener("CHATGPT_NAV_SET_LOCK", (event) => {
-    lockEnabled = Boolean(event?.detail?.enabled);
+  const isElement = (value) => value instanceof Element;
+  const scrollingElement = () => document.scrollingElement || document.documentElement;
+
+  function isGuardedScroller(el) {
+    return isElement(el) && el.hasAttribute(GUARD_ATTR);
+  }
+
+  function hasGuardedAncestor(el) {
+    let current = isElement(el) ? el : null;
+    while (current) {
+      if (isGuardedScroller(current)) return true;
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  function shouldBlockScroller(el) {
+    return enabled && isGuardedScroller(el);
+  }
+
+  function shouldBlockIntoViewTarget(el) {
+    return enabled && hasGuardedAncestor(el);
+  }
+
+  function shouldBlockWindowScroll() {
+    if (!enabled) return false;
+    const scroller = scrollingElement();
+    return isGuardedScroller(scroller) ||
+      document.documentElement?.hasAttribute(GUARD_ATTR) ||
+      document.body?.hasAttribute(GUARD_ATTR);
+  }
+
+  window.addEventListener(STATE_EVENT, (event) => {
+    enabled = Boolean(event?.detail?.enabled);
   });
 
-  window.addEventListener("CHATGPT_NAV_ALLOW_SCROLL_ONCE", (event) => {
-    const ms = Number(event?.detail?.ms) || 800;
-    allowOnce(ms);
-  });
+  const marker = Symbol.for("chatgpt-navigator-scroll-guard-v202");
 
-  const originalWindowScrollTo = window.scrollTo.bind(window);
-  const originalWindowScrollBy = window.scrollBy.bind(window);
-  const originalElementScrollIntoView = Element.prototype.scrollIntoView;
-  const originalElementScrollTo = Element.prototype.scrollTo;
-  const originalElementScrollBy = Element.prototype.scrollBy;
+  function patchMethod(owner, methodName, shouldBlock) {
+    const original = owner?.[methodName];
+    if (typeof original !== "function" || original[marker]) return;
 
-  window.scrollTo = function patchedWindowScrollTo(...args) {
-    if (shouldBlock()) return;
-    return originalWindowScrollTo(...args);
-  };
+    const wrapped = function (...args) {
+      if (shouldBlock(this, args)) return;
+      return original.apply(this, args);
+    };
+    try { Object.defineProperty(wrapped, marker, { value: true }); } catch (_) {}
 
-  window.scrollBy = function patchedWindowScrollBy(...args) {
-    if (shouldBlock()) return;
-    return originalWindowScrollBy(...args);
-  };
+    try {
+      Object.defineProperty(owner, methodName, {
+        value: wrapped,
+        writable: true,
+        configurable: true
+      });
+    } catch (_) {
+      try { owner[methodName] = wrapped; } catch (_) {}
+    }
+  }
 
-  Element.prototype.scrollIntoView = function patchedScrollIntoView(...args) {
-    if (shouldBlock()) return;
-    return originalElementScrollIntoView.apply(this, args);
-  };
+  function patchScrollTopSetter() {
+    const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+    if (!descriptor?.get || !descriptor?.set || descriptor.set[marker]) return;
 
-  Element.prototype.scrollTo = function patchedElementScrollTo(...args) {
-    if (shouldBlock()) return;
-    return originalElementScrollTo.apply(this, args);
-  };
+    const originalGet = descriptor.get;
+    const originalSet = descriptor.set;
+    const wrappedSet = function (value) {
+      if (shouldBlockScroller(this)) return;
+      return originalSet.call(this, value);
+    };
+    try { Object.defineProperty(wrappedSet, marker, { value: true }); } catch (_) {}
 
-  Element.prototype.scrollBy = function patchedElementScrollBy(...args) {
-    if (shouldBlock()) return;
-    return originalElementScrollBy.apply(this, args);
-  };
+    try {
+      Object.defineProperty(Element.prototype, "scrollTop", {
+        get: originalGet,
+        set: wrappedSet,
+        enumerable: descriptor.enumerable,
+        configurable: true
+      });
+    } catch (_) {}
+  }
+
+  function installPatches() {
+    patchMethod(Element.prototype, "scrollIntoView", (target) => shouldBlockIntoViewTarget(target));
+    patchMethod(Element.prototype, "scrollTo", (target) => shouldBlockScroller(target));
+    patchMethod(Element.prototype, "scrollBy", (target) => shouldBlockScroller(target));
+    patchMethod(Element.prototype, "scroll", (target) => shouldBlockScroller(target));
+    patchMethod(window, "scrollTo", () => shouldBlockWindowScroll());
+    patchMethod(window, "scrollBy", () => shouldBlockWindowScroll());
+    patchMethod(window, "scroll", () => shouldBlockWindowScroll());
+    patchScrollTopSetter();
+  }
+
+  installPatches();
+  // ChatGPT is a long-lived SPA. Re-check occasionally in case another script replaces a method.
+  window.setInterval(installPatches, 1000);
 })();
