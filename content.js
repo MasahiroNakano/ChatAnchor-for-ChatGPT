@@ -1,922 +1,1096 @@
 (() => {
-  if (window.__chatgptNavigatorInstalled) return;
-  window.__chatgptNavigatorInstalled = true;
+  "use strict";
 
-  const STORAGE_KEY = "scrollLockEnabled";
-  const PANEL_SIZE_KEY = "panelSize";
-  const PANEL_MINIMIZED_KEY = "panelMinimized";
-  const HOST_ID = "chatanchor-host";
-  const PANEL_ID = "chatanchor-panel";
-  const TOC_CHAR_LIMIT = 50;
-  const TOC_MIN_HEIGHT = 120;
-  const PANEL_RESERVED_HEIGHT = 104;
-  const PANEL_DEFAULT_WIDTH = 340;
-  const PANEL_DEFAULT_HEIGHT = 360;
-  const PANEL_MIN_WIDTH = 260;
-  const PANEL_MIN_HEIGHT = TOC_MIN_HEIGHT + PANEL_RESERVED_HEIGHT;
-  const PANEL_VIEWPORT_MARGIN = 40;
-  const LONG_JUMP_PX = 1200;
-  const USER_SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
+  if (globalThis.__chatgptNavigatorStayV2Installed) return;
+  globalThis.__chatgptNavigatorStayV2Installed = true;
 
-  const STATE = {
-    scrollLockEnabled: false,
+  const HOST_ID = "chatgpt-navigator-stay-v2";
+  const STORAGE_KEY = "scrollLockEnabled"; // Keep the v1 key so the old preference carries over.
+  const PREVIEW_CHARS = 58;
+  const SCAN_DELAY_MS = 120;
+  const USER_SCROLL_GRACE_MS = 260;
+  const PERIODIC_STAY_CHECK_MS = 220;
+
+  // Keep ChatGPT-specific selectors in one place. The code deliberately uses several
+  // independent signals instead of relying on one exact DOM hierarchy.
+  const SELECTORS = {
+    currentShell: "[data-turn-key]",
+    legacyShell: '[data-testid^="conversation-turn-"]',
+    userMarkers: [
+      "[data-user-message-bubble]",
+      '[data-message-author-role="user"]',
+      '[data-conversation-role="user"]',
+      '[data-role="user"]',
+      '[data-message-author="user"]'
+    ],
+    assistantMarkers: [
+      '[data-message-author-role="assistant"]',
+      '[data-conversation-role="assistant"]',
+      '[data-role="assistant"]',
+      '[data-message-author="assistant"]'
+    ],
+    userText: [
+      ".whitespace-pre-wrap",
+      '[data-message-content="user"]',
+      '[data-message-text]',
+      '[class*="whitespace-pre-wrap"]'
+    ],
+    composer: [
+      "#prompt-textarea",
+      '[contenteditable="true"][role="textbox"]',
+      "textarea",
+      "form"
+    ]
+  };
+
+  const state = {
+    stayEnabled: false,
+    routeKey: "",
+    prompts: [],
+    promptCache: new Map(),
+    ephemeralIds: new WeakMap(),
+    nextEphemeralId: 1,
     currentIndex: -1,
-    lockedScrollTop: 0,
-    suppressRestoreUntil: 0,
-    userScrollUntil: 0,
-    navInFlight: false,
-    messages: [],
-    messagesSignature: "",
-    observer: null,
+    scrollRoot: null,
+    anchor: null,
+    fallbackScrollTop: 0,
     scanTimer: 0,
-    restoreTimer: 0,
-    settleTimer: 0,
-    urlPollTimer: 0,
-    lastHref: location.href,
-    bootRetries: 0,
-    resizeSession: null,
-    panelMinimized: false,
-    panelSize: {
-      width: PANEL_DEFAULT_WIDTH,
-      height: PANEL_DEFAULT_HEIGHT,
-    },
-    ui: {
-      host: null,
-      shadow: null,
-      panel: null,
-      tocWrap: null,
-      toc: null,
-      lockBtn: null,
-      minimizeBtn: null,
-      resizeHandle: null,
-    },
+    highlightRaf: 0,
+    maintainRaf: 0,
+    periodicTimer: 0,
+    routeTimer: 0,
+    userSettleTimer: 0,
+    navRaf: 0,
+    navToken: 0,
+    navigationInFlight: false,
+    internalScrollUntil: 0,
+    userIntentUntil: 0,
+    pointerScrolling: false,
+    observer: null,
+    ui: null
   };
 
   const now = () => Date.now();
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-  function dispatchToPage(name, detail = {}) {
-    window.dispatchEvent(new CustomEvent(name, { detail }));
+  function routeKey() {
+    return `${location.pathname}${location.search}${location.hash}`;
   }
 
-  function clamp(value, min, max) {
-    return Math.min(max, Math.max(min, value));
+  function isExtensionEvent(event) {
+    if (!state.ui?.host || typeof event?.composedPath !== "function") return false;
+    return event.composedPath().includes(state.ui.host);
   }
 
-  function truncateText(text, maxChars = TOC_CHAR_LIMIT) {
-    const clean = (text || "").replace(/\s+/g, " ").trim();
-    if (!clean) return "(empty message)";
-    if (clean.length <= maxChars) return clean;
-    return `${clean.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  function isEditableTarget(target) {
+    if (!(target instanceof Element)) return false;
+    return Boolean(
+      target.closest(
+        'input, textarea, select, [contenteditable="true"], [role="textbox"]'
+      )
+    );
   }
 
-  function getScrollableAncestors(node) {
+  function isHiddenByAttribute(el) {
+    if (!(el instanceof Element)) return true;
+    return Boolean(el.closest('[hidden], [aria-hidden="true"]'));
+  }
+
+  function normalizeText(value) {
+    return (value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function truncate(value, max = PREVIEW_CHARS) {
+    const text = normalizeText(value);
+    if (!text) return "(prompt text unavailable)";
+    if (text.length <= max) return text;
+    return `${text.slice(0, Math.max(1, max - 1)).trimEnd()}…`;
+  }
+
+  function firstMatchWithin(root, selectors) {
+    if (!(root instanceof Element)) return null;
+    for (const selector of selectors) {
+      if (root.matches(selector)) return root;
+      const found = root.querySelector(selector);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function findUserMarker(root) {
+    return firstMatchWithin(root, SELECTORS.userMarkers);
+  }
+
+  function findAssistantMarker(root) {
+    return firstMatchWithin(root, SELECTORS.assistantMarkers);
+  }
+
+  function normalizeShell(marker) {
+    if (!(marker instanceof Element)) return null;
+    return (
+      marker.closest(SELECTORS.currentShell) ||
+      marker.closest(SELECTORS.legacyShell) ||
+      marker
+    );
+  }
+
+  function getStableKey(shell, marker) {
+    const candidates = [shell, marker].filter((node) => node instanceof Element);
+    for (const el of candidates) {
+      const turnKey = el.getAttribute("data-turn-key");
+      if (turnKey) return `turn-key:${turnKey}`;
+      const turnId = el.getAttribute("data-turn-id");
+      if (turnId) return `turn-id:${turnId}`;
+      const testId = el.getAttribute("data-testid");
+      if (testId && testId.startsWith("conversation-turn-")) return `testid:${testId}`;
+    }
+
+    if (!state.ephemeralIds.has(shell)) {
+      state.ephemeralIds.set(shell, state.nextEphemeralId++);
+    }
+    return `dom:${state.ephemeralIds.get(shell)}`;
+  }
+
+  function extractPromptText(marker, shell) {
+    const roots = [];
+    if (marker instanceof Element) roots.push(marker);
+    if (shell instanceof Element && shell !== marker) roots.push(shell);
+
+    for (const root of roots) {
+      for (const selector of SELECTORS.userText) {
+        if (root.matches(selector)) {
+          const text = normalizeText(root.innerText || root.textContent);
+          if (text) return text;
+        }
+        const el = root.querySelector(selector);
+        if (el) {
+          const text = normalizeText(el.innerText || el.textContent);
+          if (text) return text;
+        }
+      }
+
+      // Prefer the user-role node over the whole turn shell, because current ChatGPT
+      // can group the user prompt and assistant answer beneath one stable turn key.
+      const userNode = findUserMarker(root);
+      if (userNode) {
+        const text = normalizeText(userNode.innerText || userNode.textContent);
+        if (text) return text;
+      }
+    }
+
+    return "";
+  }
+
+  function addPromptRecord(records, seenKeys, shell, marker, forceUser = false) {
+    if (!(shell instanceof Element) || !shell.isConnected || isHiddenByAttribute(shell)) return;
+
+    const userMarker = marker instanceof Element ? marker : findUserMarker(shell);
+    if (!forceUser && !userMarker) return;
+
+    const key = getStableKey(shell, userMarker);
+    if (seenKeys.has(key)) return;
+
+    let text = extractPromptText(userMarker, shell);
+    if (text) state.promptCache.set(key, text);
+    else text = state.promptCache.get(key) || "";
+
+    const focus = userMarker || shell;
+    records.push({ key, shell, focus, text });
+    seenKeys.add(key);
+  }
+
+  function collectPrompts() {
+    const records = [];
+    const seenKeys = new Set();
+
+    // Current renderer: stable exchange shells keyed by data-turn-key. Avoid nested
+    // data-turn-key elements so one exchange cannot appear multiple times.
+    document.querySelectorAll(SELECTORS.currentShell).forEach((shell) => {
+      if (!(shell instanceof Element)) return;
+      const parentTurnKey = shell.parentElement?.closest(SELECTORS.currentShell);
+      if (parentTurnKey) return;
+      const marker = findUserMarker(shell);
+      if (marker) addPromptRecord(records, seenKeys, shell, marker, true);
+    });
+
+    // Legacy / alternate renderer: persistent conversation-turn shells. A shell with
+    // data-turn="user" remains useful even if its text was temporarily virtualized.
+    document.querySelectorAll(SELECTORS.legacyShell).forEach((shell) => {
+      if (!(shell instanceof Element)) return;
+      const explicitRole = shell.getAttribute("data-turn");
+      const marker = findUserMarker(shell);
+      if (explicitRole === "user" || marker) {
+        addPromptRecord(records, seenKeys, normalizeShell(marker || shell), marker, true);
+      }
+    });
+
+    // Last-resort role-marker scan. This survived multiple ChatGPT DOM rewrites and
+    // also covers experiments that do not expose a recognizable turn shell.
+    for (const selector of SELECTORS.userMarkers) {
+      document.querySelectorAll(selector).forEach((marker) => {
+        if (!(marker instanceof Element)) return;
+        const shell = normalizeShell(marker);
+        addPromptRecord(records, seenKeys, shell, marker, true);
+      });
+    }
+
+    records.sort((a, b) => {
+      if (a.shell === b.shell) return 0;
+      const pos = a.shell.compareDocumentPosition(b.shell);
+      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      return 0;
+    });
+
+    return records;
+  }
+
+  function getScrollerElement(root) {
+    if (
+      root === document.scrollingElement ||
+      root === document.documentElement ||
+      root === document.body ||
+      root === window
+    ) {
+      return document.scrollingElement || document.documentElement;
+    }
+    return root;
+  }
+
+  function isWindowRoot(root) {
+    const scroller = getScrollerElement(root);
+    return scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body;
+  }
+
+  function canScroll(el) {
+    if (!(el instanceof Element)) return false;
+    const style = getComputedStyle(el);
+    const overflowY = style.overflowY;
+    return (
+      /auto|scroll|overlay/.test(overflowY) &&
+      el.scrollHeight > el.clientHeight + 8 &&
+      el.clientHeight >= 180
+    );
+  }
+
+  function scrollableAncestors(node) {
     const out = [];
-    let current = node instanceof Element ? node : null;
+    let current = node instanceof Element ? node.parentElement : null;
+    let depth = 0;
     while (current && current !== document.documentElement) {
-      const style = getComputedStyle(current);
-      const overflowY = style.overflowY;
-      const isScrollable =
-        (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
-        current.scrollHeight > current.clientHeight + 10;
-      if (isScrollable) out.push(current);
+      if (canScroll(current)) out.push({ el: current, depth });
       current = current.parentElement;
+      depth += 1;
     }
     return out;
   }
 
-  function getScrollRoot() {
-    const roots = [];
-    const main = document.querySelector("main") || document.querySelector('[role="main"]');
-    const form = document.querySelector("form");
-    const textarea = document.querySelector("textarea");
-
-    if (main) {
-      roots.push(...getScrollableAncestors(main));
-      roots.push(main);
-    }
-    if (form) roots.push(...getScrollableAncestors(form));
-    if (textarea) roots.push(...getScrollableAncestors(textarea));
-    roots.push(document.scrollingElement, document.documentElement, document.body);
-
-    const unique = roots.filter(Boolean).filter((el, idx, arr) => arr.indexOf(el) === idx);
-    const candidates = unique
-      .filter((el) => el.scrollHeight > el.clientHeight + 10)
-      .map((el) => ({ el, score: (el.scrollHeight - el.clientHeight) + el.clientHeight }));
-
-    if (!candidates.length) return document.scrollingElement || document.documentElement;
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates[0].el;
-  }
-
-  function isWindowRoot(root) {
-    return root === document.body || root === document.documentElement || root === document.scrollingElement;
-  }
-
-  function getScrollTop(root) {
-    return isWindowRoot(root)
-      ? window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0
-      : root.scrollTop;
-  }
-
-  function setScrollTop(root, top, behavior = "auto") {
-    if (isWindowRoot(root)) {
-      window.scrollTo({ top, behavior });
-    } else {
-      root.scrollTo({ top, behavior });
-    }
-  }
-
-  function getViewportMetrics(root) {
-    if (isWindowRoot(root)) {
-      return { top: 0, height: window.innerHeight, scrollTop: getScrollTop(root) };
-    }
-    const rect = root.getBoundingClientRect();
-    return { top: rect.top, height: root.clientHeight, scrollTop: root.scrollTop };
-  }
-
-  function isElementVisible(el) {
-    if (!(el instanceof Element) || !el.isConnected) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }
-
-  function normalizeMessageNode(node) {
-    if (!(node instanceof Element)) return null;
-    return node.closest("article") || node.closest('[data-message-author-role="user"]') || node;
-  }
-
-  function queryUserMessages() {
-    const selectors = [
-      '[data-message-author-role="user"]',
-      '[data-author="user"]',
-      'article[data-author="user"]',
-      '[data-testid^="conversation-turn-"] [data-message-author-role="user"]',
-      'article [data-message-author-role="user"]'
-    ];
-
-    const nodes = [];
-    for (const selector of selectors) {
-      document.querySelectorAll(selector).forEach((node) => {
-        const normalized = normalizeMessageNode(node);
-        if (normalized && isElementVisible(normalized)) nodes.push(normalized);
-      });
+  function resolveScrollRoot() {
+    const sample = [];
+    if (state.prompts.length) {
+      sample.push(state.prompts[0]);
+      if (state.prompts.length > 2) sample.push(state.prompts[Math.floor(state.prompts.length / 2)]);
+      if (state.prompts.length > 1) sample.push(state.prompts[state.prompts.length - 1]);
     }
 
-    const unique = nodes.filter((node, idx, arr) => arr.indexOf(node) === idx);
-    unique.sort((a, b) => {
-      if (a === b) return 0;
-      const pos = a.compareDocumentPosition(b);
-      return pos & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
-    });
-    return unique;
-  }
-
-  function getMessageText(el) {
-    if (!(el instanceof Element)) return "";
-    const candidates = [
-      el.querySelector('[data-message-author-role="user"]'),
-      el.querySelector('[data-testid*="user"]'),
-      el,
-    ].filter(Boolean);
-
-    for (const candidate of candidates) {
-      const text = (candidate.innerText || candidate.textContent || "").replace(/\s+/g, " ").trim();
-      if (text) return text;
-    }
-    return "";
-  }
-
-  function buildMessageSignature(messages) {
-    return messages
-      .map((el, idx) => `${idx}:${truncateText(getMessageText(el), 80)}`)
-      .join("\n");
-  }
-
-  function getPanelSizeBounds() {
-    const viewportWidth = Math.max(window.innerWidth || 0, 320);
-    const viewportHeight = Math.max(window.innerHeight || 0, 320);
-    const maxWidth = Math.max(PANEL_MIN_WIDTH, viewportWidth - 32);
-    const maxHeight = Math.max(PANEL_MIN_HEIGHT, viewportHeight - PANEL_VIEWPORT_MARGIN);
-
-    return {
-      minWidth: Math.min(PANEL_MIN_WIDTH, maxWidth),
-      maxWidth,
-      minHeight: Math.min(PANEL_MIN_HEIGHT, maxHeight),
-      maxHeight,
-    };
-  }
-
-  function normalizePanelSize(size = STATE.panelSize) {
-    const bounds = getPanelSizeBounds();
-    return {
-      width: clamp(Math.round(Number(size?.width) || PANEL_DEFAULT_WIDTH), bounds.minWidth, bounds.maxWidth),
-      height: clamp(Math.round(Number(size?.height) || PANEL_DEFAULT_HEIGHT), bounds.minHeight, bounds.maxHeight),
-    };
-  }
-
-  function updateHostPosition() {
-    const host = STATE.ui.host;
-    if (!(host instanceof HTMLElement)) return;
-
-    let bottomInset = 20;
-    const rightInset = window.innerWidth <= 900 ? 12 : 20;
-
-    if (!STATE.panelMinimized && window.innerWidth <= 900) {
-      const composer =
-        document.querySelector("form") ||
-        document.querySelector("textarea")?.closest("form") ||
-        document.querySelector("textarea");
-      if (composer instanceof Element && isElementVisible(composer)) {
-        const rect = composer.getBoundingClientRect();
-        if (rect.top < window.innerHeight && rect.bottom > 0) {
-          bottomInset = Math.max(bottomInset, Math.round(window.innerHeight - rect.top + 12));
-        }
+    const scores = new Map();
+    for (const prompt of sample) {
+      const target = prompt.focus?.isConnected ? prompt.focus : prompt.shell;
+      for (const { el, depth } of scrollableAncestors(target)) {
+        const item = scores.get(el) || { count: 0, minDepth: Infinity };
+        item.count += 1;
+        item.minDepth = Math.min(item.minDepth, depth);
+        scores.set(el, item);
       }
     }
 
-    host.style.right = `${rightInset}px`;
-    host.style.bottom = `${bottomInset}px`;
-  }
-
-  function applyPanelSize() {
-    const panel = STATE.ui.panel;
-    if (!(panel instanceof HTMLElement)) return;
-
-    const bounds = getPanelSizeBounds();
-    STATE.panelSize = normalizePanelSize(STATE.panelSize);
-    panel.classList.toggle("minimized", STATE.panelMinimized);
-    panel.style.width = STATE.panelMinimized ? "auto" : `${STATE.panelSize.width}px`;
-    panel.style.height = STATE.panelMinimized ? "auto" : `${STATE.panelSize.height}px`;
-    panel.style.minWidth = STATE.panelMinimized ? "0px" : `${bounds.minWidth}px`;
-    panel.style.minHeight = STATE.panelMinimized ? "0px" : `${PANEL_MIN_HEIGHT}px`;
-    panel.style.maxWidth = `${bounds.maxWidth}px`;
-    panel.style.maxHeight = `${bounds.maxHeight}px`;
-    updateHostPosition();
-  }
-
-  function persistPanelSize() {
-    if (!chrome?.storage?.local) return;
-    chrome.storage.local.set({ [PANEL_SIZE_KEY]: STATE.panelSize });
-  }
-
-  function persistPanelMinimized() {
-    if (!chrome?.storage?.local) return;
-    chrome.storage.local.set({ [PANEL_MINIMIZED_KEY]: STATE.panelMinimized });
-  }
-
-  function updateMinimizeButton() {
-    const btn = STATE.ui.minimizeBtn;
-    if (!(btn instanceof HTMLElement)) return;
-    btn.textContent = STATE.panelMinimized ? "+" : "-";
-    btn.title = STATE.panelMinimized ? "Restore prompt navigator" : "Minimize prompt navigator";
-    btn.setAttribute("aria-pressed", String(STATE.panelMinimized));
-    btn.setAttribute("aria-label", btn.title);
-  }
-
-  function togglePanelMinimized(force, persist = true) {
-    STATE.panelMinimized = typeof force === "boolean" ? force : !STATE.panelMinimized;
-    updateMinimizeButton();
-    applyPanelSize();
-    if (persist) persistPanelMinimized();
-  }
-
-  function stopPanelResize(event) {
-    const session = STATE.resizeSession;
-    if (!session) return;
-    if (event && event.pointerId !== session.pointerId) return;
-
-    window.removeEventListener("pointermove", handlePanelResizeMove, true);
-    window.removeEventListener("pointerup", stopPanelResize, true);
-    window.removeEventListener("pointercancel", stopPanelResize, true);
-    document.documentElement.style.cursor = session.prevCursor;
-    document.documentElement.style.userSelect = session.prevUserSelect;
-    if (STATE.ui.resizeHandle?.releasePointerCapture) {
-      try {
-        STATE.ui.resizeHandle.releasePointerCapture(session.pointerId);
-      } catch {}
+    if (!scores.size) {
+      for (const selector of SELECTORS.composer) {
+        const composer = document.querySelector(selector);
+        if (!composer) continue;
+        for (const { el, depth } of scrollableAncestors(composer)) {
+          const item = scores.get(el) || { count: 0, minDepth: Infinity };
+          item.count += 1;
+          item.minDepth = Math.min(item.minDepth, depth);
+          scores.set(el, item);
+        }
+        if (scores.size) break;
+      }
     }
-    STATE.resizeSession = null;
-    persistPanelSize();
+
+    let best = null;
+    let bestScore = -Infinity;
+    for (const [el, meta] of scores) {
+      const range = Math.max(0, el.scrollHeight - el.clientHeight);
+      const score = meta.count * 1_000_000 - meta.minDepth * 10_000 + el.clientHeight + range * 0.001;
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+
+    return best || document.scrollingElement || document.documentElement;
   }
 
-  function handlePanelResizeMove(event) {
-    const session = STATE.resizeSession;
-    if (!session || event.pointerId !== session.pointerId) return;
+  function refreshScrollRoot() {
+    const next = resolveScrollRoot();
+    const changed = getScrollerElement(next) !== getScrollerElement(state.scrollRoot);
+    state.scrollRoot = next;
+    if (changed && state.stayEnabled) captureStayAnchor();
+    return next;
+  }
 
-    event.preventDefault();
-    STATE.panelSize = normalizePanelSize({
-      width: session.startWidth - (event.clientX - session.startX),
-      height: session.startHeight - (event.clientY - session.startY),
+  function getScrollRoot() {
+    const root = state.scrollRoot;
+    if (root instanceof Element && root.isConnected) return root;
+    return refreshScrollRoot();
+  }
+
+  function getScrollTop(root = getScrollRoot()) {
+    const scroller = getScrollerElement(root);
+    return Number(scroller?.scrollTop || 0);
+  }
+
+  function maxScrollTop(root = getScrollRoot()) {
+    const scroller = getScrollerElement(root);
+    if (!scroller) return 0;
+    return Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  }
+
+  function setScrollTop(root, top) {
+    const scroller = getScrollerElement(root);
+    if (!scroller) return;
+    state.internalScrollUntil = now() + 80;
+    scroller.scrollTop = clamp(top, 0, Math.max(0, scroller.scrollHeight - scroller.clientHeight));
+  }
+
+  function viewportMetrics(root = getScrollRoot()) {
+    if (isWindowRoot(root)) {
+      return { top: 0, height: window.innerHeight || document.documentElement.clientHeight || 1 };
+    }
+    const rect = root.getBoundingClientRect();
+    return { top: rect.top, height: root.clientHeight || rect.height || 1 };
+  }
+
+  function elementY(el, root = getScrollRoot()) {
+    if (!(el instanceof Element) || !el.isConnected) return null;
+    const rect = el.getBoundingClientRect();
+    const metrics = viewportMetrics(root);
+    return rect.top - metrics.top;
+  }
+
+  function promptFocusElement(prompt) {
+    if (prompt?.focus instanceof Element && prompt.focus.isConnected) return prompt.focus;
+    if (prompt?.shell instanceof Element && prompt.shell.isConnected) return prompt.shell;
+    return null;
+  }
+
+  function findNearestPromptIndex(root = getScrollRoot()) {
+    if (!state.prompts.length) return -1;
+    const metrics = viewportMetrics(root);
+    const targetY = metrics.height * 0.34;
+    let bestIndex = -1;
+    let bestDistance = Infinity;
+
+    state.prompts.forEach((prompt, index) => {
+      const el = promptFocusElement(prompt);
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (!Number.isFinite(rect.top)) return;
+      const y = rect.top - metrics.top + Math.min(rect.height, 80) / 2;
+      const distance = Math.abs(y - targetY);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
     });
-    applyPanelSize();
-    updateTOCLayout();
+
+    return bestIndex;
   }
 
-  function startPanelResize(event) {
-    if (!(STATE.ui.panel instanceof HTMLElement)) return;
+  function resolveAnchorElement(anchor) {
+    if (!anchor) return null;
+    if (anchor.element instanceof Element && anchor.element.isConnected) return anchor.element;
 
-    event.preventDefault();
-    event.stopPropagation();
-    applyPanelSize();
-    STATE.resizeSession = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      startWidth: STATE.panelSize.width,
-      startHeight: STATE.panelSize.height,
-      prevCursor: document.documentElement.style.cursor,
-      prevUserSelect: document.documentElement.style.userSelect,
+    const prompt = state.prompts.find((item) => item.key === anchor.key);
+    if (prompt?.shell?.isConnected) {
+      anchor.element = prompt.shell;
+      return prompt.shell;
+    }
+    return null;
+  }
+
+  function captureStayAnchor() {
+    if (!state.stayEnabled || state.navigationInFlight) return;
+    const root = getScrollRoot();
+    state.fallbackScrollTop = getScrollTop(root);
+
+    const index = findNearestPromptIndex(root);
+    if (index < 0) {
+      state.anchor = null;
+      return;
+    }
+
+    const prompt = state.prompts[index];
+    const anchorElement = prompt.shell?.isConnected ? prompt.shell : promptFocusElement(prompt);
+    const y = elementY(anchorElement, root);
+    if (y == null) {
+      state.anchor = null;
+      return;
+    }
+
+    state.anchor = {
+      key: prompt.key,
+      element: anchorElement,
+      screenY: y,
+      fallbackScrollTop: state.fallbackScrollTop
     };
-    document.documentElement.style.cursor = "nwse-resize";
-    document.documentElement.style.userSelect = "none";
-    if (STATE.ui.resizeHandle?.setPointerCapture) {
-      try {
-        STATE.ui.resizeHandle.setPointerCapture(event.pointerId);
-      } catch {}
-    }
-    window.addEventListener("pointermove", handlePanelResizeMove, true);
-    window.addEventListener("pointerup", stopPanelResize, true);
-    window.addEventListener("pointercancel", stopPanelResize, true);
   }
 
-  function updateTOCLayout() {
-    const panel = STATE.ui.panel;
-    if (!(panel instanceof HTMLElement)) return;
+  function maintainStayPosition() {
+    if (!state.stayEnabled || state.navigationInFlight) return;
+    if (now() < state.userIntentUntil || state.pointerScrolling) return;
+    if (now() < state.internalScrollUntil) return;
 
-    applyPanelSize();
-  }
+    const root = getScrollRoot();
+    const anchor = state.anchor;
+    const anchorEl = resolveAnchorElement(anchor);
 
-  function ensureUI() {
-    if (STATE.ui.host?.isConnected && STATE.ui.shadow) return;
-
-    let host = document.getElementById(HOST_ID);
-    if (!(host instanceof HTMLElement)) {
-      host = document.createElement("div");
-      host.id = HOST_ID;
-      host.style.position = "fixed";
-      host.style.right = "20px";
-      host.style.bottom = "20px";
-      host.style.zIndex = "2147483647";
-      host.style.pointerEvents = "none";
-      document.documentElement.appendChild(host);
+    if (anchor && anchorEl) {
+      const currentY = elementY(anchorEl, root);
+      if (currentY == null) return;
+      const delta = currentY - anchor.screenY;
+      if (Math.abs(delta) > 0.75) {
+        const nextTop = clamp(getScrollTop(root) + delta, 0, maxScrollTop(root));
+        setScrollTop(root, nextTop);
+        state.fallbackScrollTop = nextTop;
+        anchor.fallbackScrollTop = nextTop;
+      }
+      return;
     }
 
-    const shadow = host.shadowRoot || host.attachShadow({ mode: "open" });
+    const currentTop = getScrollTop(root);
+    if (Math.abs(currentTop - state.fallbackScrollTop) > 1) {
+      setScrollTop(root, state.fallbackScrollTop);
+    }
+  }
+
+  function scheduleMaintain() {
+    if (!state.stayEnabled || state.maintainRaf) return;
+    state.maintainRaf = requestAnimationFrame(() => {
+      state.maintainRaf = 0;
+      maintainStayPosition();
+    });
+  }
+
+  function startPeriodicStayCheck() {
+    stopPeriodicStayCheck();
+    if (!state.stayEnabled) return;
+    const tick = () => {
+      state.periodicTimer = window.setTimeout(() => {
+        scheduleMaintain();
+        tick();
+      }, PERIODIC_STAY_CHECK_MS);
+    };
+    tick();
+  }
+
+  function stopPeriodicStayCheck() {
+    if (state.periodicTimer) window.clearTimeout(state.periodicTimer);
+    state.periodicTimer = 0;
+  }
+
+  function markUserScrollIntent(ms = USER_SCROLL_GRACE_MS) {
+    state.userIntentUntil = Math.max(state.userIntentUntil, now() + ms);
+  }
+
+  function scheduleAnchorCaptureAfterUserScroll(delay = 90) {
+    if (!state.stayEnabled) return;
+    window.clearTimeout(state.userSettleTimer);
+    state.userSettleTimer = window.setTimeout(() => {
+      if (!state.pointerScrolling && now() >= state.userIntentUntil - 10) {
+        captureStayAnchor();
+      } else {
+        scheduleAnchorCaptureAfterUserScroll(80);
+      }
+    }, delay);
+  }
+
+  function targetTopForElement(el, root) {
+    const current = getScrollTop(root);
+    const rect = el.getBoundingClientRect();
+    const metrics = viewportMetrics(root);
+    const yWithinViewport = rect.top - metrics.top;
+    const visualHeight = Math.min(rect.height || 0, 120);
+    const target = current + yWithinViewport - metrics.height / 2 + visualHeight / 2;
+    return clamp(target, 0, maxScrollTop(root));
+  }
+
+  function cancelNavigationAnimation() {
+    state.navToken += 1;
+    if (state.navRaf) cancelAnimationFrame(state.navRaf);
+    state.navRaf = 0;
+    state.navigationInFlight = false;
+  }
+
+  function animateScroll(root, targetTop) {
+    cancelNavigationAnimation();
+    const token = state.navToken;
+    const startTop = getScrollTop(root);
+    const distance = targetTop - startTop;
+    const absDistance = Math.abs(distance);
+
+    if (absDistance < 8) {
+      setScrollTop(root, targetTop);
+      return Promise.resolve();
+    }
+
+    const duration = clamp(120 + absDistance / 18, 140, 260);
+    const started = performance.now();
+    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+    state.navigationInFlight = true;
+
+    return new Promise((resolve) => {
+      const frame = (ts) => {
+        if (token !== state.navToken) {
+          state.navigationInFlight = false;
+          resolve();
+          return;
+        }
+        const t = clamp((ts - started) / duration, 0, 1);
+        setScrollTop(root, startTop + distance * easeOutCubic(t));
+        if (t < 1) {
+          state.navRaf = requestAnimationFrame(frame);
+        } else {
+          state.navRaf = 0;
+          setScrollTop(root, targetTop);
+          state.navigationInFlight = false;
+          resolve();
+        }
+      };
+      state.navRaf = requestAnimationFrame(frame);
+    });
+  }
+
+  async function scrollToPrompt(index) {
+    if (!state.prompts.length) return;
+    const nextIndex = clamp(index, 0, state.prompts.length - 1);
+    const prompt = state.prompts[nextIndex];
+    const el = promptFocusElement(prompt);
+    if (!el) return;
+
+    const root = refreshScrollRoot();
+    state.currentIndex = nextIndex;
+    renderActiveState();
+    await animateScroll(root, targetTopForElement(el, root));
+
+    state.currentIndex = nextIndex;
+    renderActiveState();
+    if (state.stayEnabled) captureStayAnchor();
+  }
+
+  async function jump(direction) {
+    if (!state.prompts.length || state.navigationInFlight) return;
+    const root = getScrollRoot();
+    let index = state.currentIndex;
+    if (index < 0 || index >= state.prompts.length) index = findNearestPromptIndex(root);
+    if (index < 0) index = direction > 0 ? -1 : 0;
+    await scrollToPrompt(clamp(index + direction, 0, state.prompts.length - 1));
+  }
+
+  function updateStayButton() {
+    if (!state.ui) return;
+    const { stayButton } = state.ui;
+    stayButton.textContent = state.stayEnabled ? "Stay" : "Follow";
+    stayButton.setAttribute("aria-pressed", String(state.stayEnabled));
+    stayButton.dataset.active = state.stayEnabled ? "true" : "false";
+    stayButton.title = state.stayEnabled
+      ? "Stay is ON: keep the current reading position"
+      : "Follow is ON: let ChatGPT control scrolling normally";
+  }
+
+  function persistStayState() {
+    const storage = globalThis.chrome?.storage?.local;
+    if (!storage) return;
+    storage.set({ [STORAGE_KEY]: state.stayEnabled });
+  }
+
+  function setStayEnabled(enabled, persist = true) {
+    state.stayEnabled = Boolean(enabled);
+    updateStayButton();
+    if (persist) persistStayState();
+
+    if (state.stayEnabled) {
+      refreshScrollRoot();
+      captureStayAnchor();
+      startPeriodicStayCheck();
+      scheduleMaintain();
+    } else {
+      stopPeriodicStayCheck();
+      state.anchor = null;
+    }
+  }
+
+  function buildUI() {
+    const existing = document.getElementById(HOST_ID);
+    if (existing) existing.remove();
+
+    const host = document.createElement("div");
+    host.id = HOST_ID;
+    host.style.position = "fixed";
+    host.style.right = "16px";
+    host.style.bottom = "16px";
+    host.style.zIndex = "2147483647";
+    host.style.pointerEvents = "auto";
+
+    const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
         :host { all: initial; }
-        #${PANEL_ID} {
-          pointer-events: auto;
-          box-sizing: border-box;
-          width: ${PANEL_DEFAULT_WIDTH}px;
-          height: ${PANEL_DEFAULT_HEIGHT}px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          padding: 10px;
-          border-radius: 16px;
-          background: rgba(20,20,20,0.76);
-          backdrop-filter: blur(8px);
-          -webkit-backdrop-filter: blur(8px);
-          border: 1px solid rgba(255,255,255,0.12);
-          box-shadow: 0 10px 30px rgba(0,0,0,0.22);
-          font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          color: white;
-          overflow: hidden;
-          min-width: ${PANEL_MIN_WIDTH}px;
-          min-height: ${PANEL_MIN_HEIGHT}px;
-          max-height: calc(100vh - ${PANEL_VIEWPORT_MARGIN}px);
+        * { box-sizing: border-box; }
+        .panel {
+          width: 246px;
+          max-width: min(246px, calc(100vw - 24px));
+          padding: 8px;
+          border: 1px solid rgba(255,255,255,.12);
+          border-radius: 14px;
+          background: rgba(23,23,23,.88);
+          color: #f7f7f7;
+          box-shadow: 0 12px 34px rgba(0,0,0,.26);
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+          font: 12px/1.3 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
-        .toc-wrap {
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-          min-height: 0;
-          flex: 1 1 0;
-          overflow: hidden;
-        }
-        .panel-header {
+        .header {
           display: flex;
           align-items: center;
+          justify-content: space-between;
           gap: 8px;
-          flex: 0 0 auto;
-          min-height: 18px;
+          padding: 2px 4px 7px;
+          color: rgba(255,255,255,.78);
+          user-select: none;
         }
-        .toc-label {
-          flex: 1 1 auto;
-          min-width: 0;
-          color: rgba(255,255,255,0.86);
-          font-size: 12px;
-          font-weight: 700;
-          letter-spacing: 0.02em;
-          padding: 0 2px;
-        }
+        .title { font-weight: 650; letter-spacing: .01em; }
+        .count { font-variant-numeric: tabular-nums; opacity: .72; }
         .toc {
           display: flex;
           flex-direction: column;
-          align-items: stretch;
-          gap: 6px;
-          min-height: 0;
-          flex: 1 1 0;
+          gap: 4px;
+          max-height: min(260px, 42vh);
           overflow-y: auto;
-          overflow-x: hidden;
-          padding-right: 2px;
-          scrollbar-gutter: stable;
           overscroll-behavior: contain;
+          scrollbar-width: thin;
+          padding-right: 2px;
         }
+        .empty {
+          padding: 9px 8px;
+          border-radius: 8px;
+          color: rgba(255,255,255,.58);
+          background: rgba(255,255,255,.04);
+        }
+        button {
+          appearance: none;
+          border: 1px solid rgba(255,255,255,.10);
+          color: #fff;
+          background: rgba(255,255,255,.055);
+          font: inherit;
+          cursor: pointer;
+        }
+        button:hover { background: rgba(255,255,255,.12); }
+        button:focus-visible { outline: 2px solid rgba(142,198,255,.9); outline-offset: 1px; }
         .toc-item {
           width: 100%;
-          display: block;
-          box-sizing: border-box;
-          flex: 0 0 auto;
-          min-height: 33px;
+          min-height: 30px;
+          padding: 6px 8px;
+          border-radius: 8px;
           text-align: left;
-          padding: 7px 9px;
-          border-radius: 10px;
-          border: 1px solid rgba(255,255,255,0.08);
-          background: rgba(255,255,255,0.06);
-          color: white;
-          font-size: 12px;
-          line-height: 1.3;
-          cursor: pointer;
-          margin: 0;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+          line-height: 1.28;
+          opacity: .9;
         }
-        .toc-item:hover { background: rgba(255,255,255,0.12); }
-        .toc-item.active {
-          background: rgba(255,255,255,0.16);
-          border-color: rgba(255,255,255,0.28);
+        .toc-item[data-active="true"] {
+          background: rgba(255,255,255,.17);
+          border-color: rgba(255,255,255,.24);
+          opacity: 1;
         }
-        .buttons {
+        .controls {
           display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 8px;
-          flex: 0 0 auto;
+          grid-template-columns: 1fr 1fr 1.22fr;
+          gap: 6px;
+          margin-top: 8px;
         }
-        .panel-toggle {
-          width: 22px;
-          height: 22px;
-          padding: 0;
-          border-radius: 6px;
-          border: 1px solid rgba(255,255,255,0.16);
-          background: rgba(255,255,255,0.08);
-          color: white;
-          font-size: 14px;
-          line-height: 1;
-          cursor: pointer;
-          flex: 0 0 auto;
+        .control {
+          height: 36px;
+          border-radius: 9px;
+          font-weight: 650;
         }
-        .panel-toggle:hover { background: rgba(255,255,255,0.16); }
-        .resize-handle {
-          display: block;
-          width: 16px;
-          height: 16px;
-          padding: 0;
-          border: 0;
-          border-radius: 4px;
-          appearance: none;
-          -webkit-appearance: none;
-          background-color: transparent;
-          background:
-            linear-gradient(135deg,
-              transparent 0 34%,
-              rgba(255,255,255,0.52) 34% 42%,
-              transparent 42% 56%,
-              rgba(255,255,255,0.52) 56% 64%,
-              transparent 64% 100%);
-          cursor: nwse-resize;
-          opacity: 0.72;
-          touch-action: none;
-          flex: 0 0 auto;
+        .stay[data-active="true"] {
+          background: rgba(68,153,104,.28);
+          border-color: rgba(111,209,151,.34);
         }
-        .resize-handle:hover { opacity: 1; }
-        #${PANEL_ID}.minimized .toc {
-          display: none;
-        }
-        #${PANEL_ID}.minimized .buttons {
-          display: none;
-        }
-        #${PANEL_ID}.minimized {
-          width: auto;
-          height: auto;
-          min-width: 0;
-          min-height: 0;
-          padding: 0;
-          gap: 0;
-          border-radius: 999px;
-        }
-        #${PANEL_ID}.minimized .toc-wrap {
-          flex: 0 0 auto;
-          overflow: visible;
-        }
-        #${PANEL_ID}.minimized .panel-header {
-          min-height: 0;
-          gap: 0;
-        }
-        #${PANEL_ID}.minimized .toc-label {
-          display: none;
-        }
-        #${PANEL_ID}.minimized .resize-handle {
-          display: none;
-        }
-        #${PANEL_ID}.minimized .panel-toggle {
-          width: 30px;
-          height: 30px;
-          border-radius: 999px;
-        }
-        .btn {
-          min-width: 0;
-          height: 38px;
-          border-radius: 12px;
-          border: 1px solid rgba(255,255,255,0.16);
-          background: rgba(255,255,255,0.08);
-          color: white;
-          font-size: 14px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
-        }
-        .btn:hover { background: rgba(255,255,255,0.16); }
-        .btn:active { transform: translateY(1px); }
-        .empty {
-          flex: 0 0 auto;
-          color: rgba(255,255,255,0.7);
-          font-size: 12px;
-          line-height: 1.4;
-          padding: 6px 2px;
+        @media (prefers-color-scheme: light) {
+          .panel {
+            border-color: rgba(0,0,0,.11);
+            background: rgba(250,250,250,.92);
+            color: #171717;
+            box-shadow: 0 12px 34px rgba(0,0,0,.16);
+          }
+          .header { color: rgba(0,0,0,.64); }
+          .empty { color: rgba(0,0,0,.55); background: rgba(0,0,0,.04); }
+          button { color: #171717; border-color: rgba(0,0,0,.10); background: rgba(0,0,0,.045); }
+          button:hover { background: rgba(0,0,0,.09); }
+          .toc-item[data-active="true"] { background: rgba(0,0,0,.10); border-color: rgba(0,0,0,.18); }
+          .stay[data-active="true"] { background: rgba(32,137,77,.13); border-color: rgba(32,137,77,.28); }
         }
       </style>
-      <div id="${PANEL_ID}">
-        <div class="toc-wrap">
-          <div class="panel-header">
-            <button class="resize-handle" type="button" title="Resize navigator" aria-label="Resize navigator"></button>
-            <div class="toc-label">Your prompts</div>
-            <button class="panel-toggle" type="button" title="Minimize prompt navigator" aria-label="Minimize prompt navigator">-</button>
-          </div>
-          <div class="toc"></div>
-        </div>
-        <div class="buttons">
-          <button class="btn up" type="button" title="Jump to previous prompt you sent">▲</button>
-          <button class="btn down" type="button" title="Jump to next prompt you sent">▼</button>
-          <button class="btn lock" type="button" title="Toggle scroll lock">Follow</button>
+      <div class="panel" role="navigation" aria-label="ChatGPT prompt navigator">
+        <div class="header"><span class="title">Prompts</span><span class="count">0</span></div>
+        <div class="toc"></div>
+        <div class="controls">
+          <button type="button" class="control previous" title="Previous prompt (Alt+Up)" aria-label="Previous prompt">▲</button>
+          <button type="button" class="control next" title="Next prompt (Alt+Down)" aria-label="Next prompt">▼</button>
+          <button type="button" class="control stay" title="Toggle Stay / Follow (Alt+L)" aria-label="Toggle Stay or Follow"></button>
         </div>
       </div>
     `;
 
-    STATE.ui.host = host;
-    STATE.ui.shadow = shadow;
-    STATE.ui.panel = shadow.getElementById(PANEL_ID);
-    STATE.ui.tocWrap = shadow.querySelector(".toc-wrap");
-    STATE.ui.toc = shadow.querySelector(".toc");
-    STATE.ui.lockBtn = shadow.querySelector(".lock");
-    STATE.ui.minimizeBtn = shadow.querySelector(".panel-toggle");
-    STATE.ui.resizeHandle = shadow.querySelector(".resize-handle");
+    const toc = shadow.querySelector(".toc");
+    const count = shadow.querySelector(".count");
+    const previousButton = shadow.querySelector(".previous");
+    const nextButton = shadow.querySelector(".next");
+    const stayButton = shadow.querySelector(".stay");
 
-    shadow.querySelector(".up")?.addEventListener("click", () => { void jump(-1); });
-    shadow.querySelector(".down")?.addEventListener("click", () => { void jump(1); });
-    STATE.ui.lockBtn?.addEventListener("click", () => {
-      applyLockState(!STATE.scrollLockEnabled, true);
-    });
-    STATE.ui.minimizeBtn?.addEventListener("click", () => {
-      togglePanelMinimized(undefined, true);
-    });
-    STATE.ui.resizeHandle?.addEventListener("pointerdown", startPanelResize);
+    previousButton.addEventListener("click", () => void jump(-1));
+    nextButton.addEventListener("click", () => void jump(1));
+    stayButton.addEventListener("click", () => setStayEnabled(!state.stayEnabled, true));
 
-    updateMinimizeButton();
-    applyPanelSize();
-    applyLockState(STATE.scrollLockEnabled, false);
+    document.documentElement.appendChild(host);
+    state.ui = { host, shadow, toc, count, previousButton, nextButton, stayButton };
+    updateStayButton();
+  }
+
+  function promptSignature(prompts) {
+    return prompts.map((prompt) => `${prompt.key}\u0000${prompt.text}`).join("\n");
+  }
+
+  let lastRenderedSignature = "";
+
+  function renderTOC(force = false) {
+    if (!state.ui) return;
+    const signature = promptSignature(state.prompts);
+    if (!force && signature === lastRenderedSignature) {
+      renderActiveState();
+      return;
+    }
+    lastRenderedSignature = signature;
+
+    const { toc, count } = state.ui;
+    count.textContent = String(state.prompts.length);
+    toc.replaceChildren();
+
+    if (!state.prompts.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No user prompts detected";
+      toc.appendChild(empty);
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    state.prompts.forEach((prompt, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "toc-item";
+      button.dataset.index = String(index);
+      button.dataset.active = "false";
+      button.textContent = `${index + 1}. ${truncate(prompt.text)}`;
+      button.title = prompt.text || `Prompt ${index + 1}`;
+      button.addEventListener("click", () => void scrollToPrompt(index));
+      frag.appendChild(button);
+    });
+    toc.appendChild(frag);
+    renderActiveState();
+  }
+
+  function renderActiveState() {
+    if (!state.ui || !state.prompts.length) return;
+    const items = state.ui.toc.querySelectorAll(".toc-item");
+    items.forEach((item, index) => {
+      item.dataset.active = index === state.currentIndex ? "true" : "false";
+    });
+
+    const active = state.ui.toc.querySelector(`.toc-item[data-index="${state.currentIndex}"]`);
+    if (active && state.ui.toc.matches(":hover") === false) {
+      const top = active.offsetTop;
+      const bottom = top + active.offsetHeight;
+      if (top < state.ui.toc.scrollTop) state.ui.toc.scrollTop = top;
+      else if (bottom > state.ui.toc.scrollTop + state.ui.toc.clientHeight) {
+        state.ui.toc.scrollTop = bottom - state.ui.toc.clientHeight;
+      }
+    }
+  }
+
+  function updateActiveSoon() {
+    if (state.highlightRaf) return;
+    state.highlightRaf = requestAnimationFrame(() => {
+      state.highlightRaf = 0;
+      if (!state.prompts.length || state.navigationInFlight) return;
+      const index = findNearestPromptIndex(getScrollRoot());
+      if (index >= 0 && index !== state.currentIndex) {
+        state.currentIndex = index;
+        renderActiveState();
+      }
+    });
+  }
+
+  function resetForRoute(nextRoute) {
+    cancelNavigationAnimation();
+    state.routeKey = nextRoute;
+    state.prompts = [];
+    state.promptCache.clear();
+    state.ephemeralIds = new WeakMap();
+    state.nextEphemeralId = 1;
+    state.currentIndex = -1;
+    state.scrollRoot = null;
+    state.anchor = null;
+    state.fallbackScrollTop = 0;
+    lastRenderedSignature = "";
     renderTOC(true);
   }
 
-  function updateLockButton() {
-    const btn = STATE.ui.lockBtn;
-    if (!btn) return;
-    btn.textContent = STATE.scrollLockEnabled ? "Stay" : "Follow";
-    btn.setAttribute("aria-pressed", String(STATE.scrollLockEnabled));
-    btn.title = STATE.scrollLockEnabled
-      ? "Scroll lock is ON: stay at the current position"
-      : "Scroll lock is OFF: follow the latest messages";
-    btn.style.opacity = STATE.scrollLockEnabled ? "1" : "0.84";
-  }
+  function scanNow() {
+    state.scanTimer = 0;
+    const nextRoute = routeKey();
+    if (nextRoute !== state.routeKey) resetForRoute(nextRoute);
 
-  function renderTOC(force = false) {
-    ensureUI();
-    const toc = STATE.ui.toc;
-    if (!toc) return;
+    const previous = state.prompts;
+    const next = collectPrompts();
+    const same =
+      previous.length === next.length &&
+      previous.every((item, index) => item.key === next[index].key && item.text === next[index].text);
 
-    const signature = buildMessageSignature(STATE.messages);
-    const root = getScrollRoot();
-    const activeIndex = STATE.messages.length ? findNearestVisibleIndex(STATE.messages, root) : -1;
-    if (activeIndex >= 0 && !STATE.navInFlight) STATE.currentIndex = activeIndex;
+    state.prompts = next;
+    refreshScrollRoot();
 
-    if (!force && signature === STATE.messagesSignature && toc.childElementCount === STATE.messages.length) {
-      [...toc.children].forEach((child, idx) => {
-        if (child instanceof HTMLElement) child.classList.toggle("active", idx === activeIndex);
-      });
-      const active = toc.children[activeIndex];
-      if (active instanceof HTMLElement) active.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "auto" });
-      updateTOCLayout();
-      return;
-    }
-
-    STATE.messagesSignature = signature;
-    toc.innerHTML = "";
-
-    if (!STATE.messages.length) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = "No prompts found yet";
-      toc.appendChild(empty);
-      updateTOCLayout();
-      return;
-    }
-
-    STATE.messages.forEach((node, idx) => {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.className = `toc-item${idx === activeIndex ? " active" : ""}`;
-      const rawText = getMessageText(node);
-      item.textContent = truncateText(rawText);
-      item.title = rawText || "(empty message)";
-      item.addEventListener("click", () => { void jumpToIndex(idx); });
-      toc.appendChild(item);
-    });
-
-    updateTOCLayout();
-  }
-
-  function findNearestVisibleIndex(nodes, root) {
-    if (!nodes.length) return -1;
-    const metrics = getViewportMetrics(root);
-    const anchor = metrics.height * 0.35;
-    let bestIdx = 0;
-    let bestDist = Infinity;
-
-    for (let i = 0; i < nodes.length; i += 1) {
-      const rect = nodes[i].getBoundingClientRect();
-      const mid = rect.top - metrics.top + rect.height / 2;
-      const dist = Math.abs(mid - anchor);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestIdx = i;
-      }
-    }
-    return bestIdx;
-  }
-
-  function setUserScrollIntent(ms = 900) {
-    STATE.userScrollUntil = now() + ms;
-  }
-
-  function updateLockedPositionFromCurrent() {
-    STATE.lockedScrollTop = getScrollTop(getScrollRoot());
-  }
-
-  function maybeRestoreScroll() {
-    if (!STATE.scrollLockEnabled || STATE.navInFlight) return;
-    if (now() < STATE.suppressRestoreUntil) return;
-    const root = getScrollRoot();
-    const current = getScrollTop(root);
-    if (Math.abs(current - STATE.lockedScrollTop) <= 2) return;
-    dispatchToPage("CHATGPT_NAV_ALLOW_SCROLL_ONCE", { ms: 80 });
-    setScrollTop(root, STATE.lockedScrollTop, "auto");
-  }
-
-  function scheduleRestoreBurst() {
-    if (!STATE.scrollLockEnabled || STATE.navInFlight) return;
-    clearTimeout(STATE.restoreTimer);
-    let ticks = 0;
-    const run = () => {
-      maybeRestoreScroll();
-      ticks += 1;
-      if (ticks < 8) STATE.restoreTimer = window.setTimeout(run, 60);
-    };
-    STATE.restoreTimer = window.setTimeout(run, 0);
-  }
-
-  function applyLockState(enabled, persist = true) {
-    STATE.scrollLockEnabled = Boolean(enabled);
-    updateLockButton();
-    if (persist && chrome?.storage?.local) {
-      chrome.storage.local.set({ [STORAGE_KEY]: STATE.scrollLockEnabled });
-    }
-    dispatchToPage("CHATGPT_NAV_SET_LOCK", { enabled: STATE.scrollLockEnabled });
-    if (STATE.scrollLockEnabled) {
-      updateLockedPositionFromCurrent();
-      scheduleRestoreBurst();
-    }
-  }
-
-  function getTargetTopForCenter(el, root) {
-    const rect = el.getBoundingClientRect();
-    const metrics = getViewportMetrics(root);
-    const currentTop = getScrollTop(root);
-    const absoluteTop = currentTop + (rect.top - metrics.top);
-    const maxTop = Math.max(0, root.scrollHeight - metrics.height);
-    return clamp(absoluteTop - metrics.height / 2 + rect.height / 2, 0, maxTop);
-  }
-
-  function fastScrollToTop(root, targetTop, { minDuration = 80, maxDuration = 170, pxPerMs = 20 } = {}) {
-    const startTop = getScrollTop(root);
-    const distance = targetTop - startTop;
-    const absDistance = Math.abs(distance);
-    if (absDistance < 12) {
-      setScrollTop(root, targetTop, "auto");
-      return Promise.resolve();
-    }
-
-    const duration = Math.max(minDuration, Math.min(maxDuration, absDistance / pxPerMs));
-    const startedAt = performance.now();
-    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
-
-    return new Promise((resolve) => {
-      function frame(ts) {
-        const elapsed = ts - startedAt;
-        const t = Math.min(1, elapsed / duration);
-        setScrollTop(root, startTop + distance * easeOutCubic(t), "auto");
-        if (t < 1) {
-          requestAnimationFrame(frame);
-        } else {
-          setScrollTop(root, targetTop, "auto");
-          resolve();
-        }
-      }
-      requestAnimationFrame(frame);
-    });
-  }
-
-  function settleAfterNavigation(targetTop, delay = 120) {
-    return new Promise((resolve) => {
-      clearTimeout(STATE.settleTimer);
-      STATE.settleTimer = window.setTimeout(() => {
-        STATE.lockedScrollTop = getScrollTop(getScrollRoot());
-        STATE.suppressRestoreUntil = now() + 100;
-        resolve(targetTop);
-      }, delay);
-    });
-  }
-
-  async function scrollElementToCenter(el) {
-    if (!(el instanceof Element) || !el.isConnected) return;
-    const root = getScrollRoot();
-    const targetTop = getTargetTopForCenter(el, root);
-    const distance = Math.abs(targetTop - getScrollTop(root));
-    const useNativeSmooth = distance <= Math.max(LONG_JUMP_PX, getViewportMetrics(root).height * 1.25);
-    const allowMs = useNativeSmooth ? 900 : 260;
-
-    STATE.navInFlight = true;
-    try {
-      STATE.suppressRestoreUntil = now() + allowMs;
-      dispatchToPage("CHATGPT_NAV_ALLOW_SCROLL_ONCE", { ms: allowMs });
-      if (useNativeSmooth) {
-        setScrollTop(root, targetTop, "smooth");
-        await new Promise((resolve) => setTimeout(resolve, 220));
-      } else {
-        await fastScrollToTop(root, targetTop);
-      }
-      await settleAfterNavigation(targetTop, 120);
-    } finally {
-      STATE.navInFlight = false;
+    if (!same) {
+      const activeKey = previous[state.currentIndex]?.key;
+      const newIndex = activeKey ? next.findIndex((item) => item.key === activeKey) : -1;
+      state.currentIndex = newIndex >= 0 ? newIndex : findNearestPromptIndex(getScrollRoot());
+      renderTOC(true);
+      if (state.stayEnabled && now() >= state.userIntentUntil) captureStayAnchor();
+    } else {
       renderTOC(false);
     }
+
+    updateActiveSoon();
+    scheduleMaintain();
   }
 
-  async function jump(dir) {
-    if (STATE.navInFlight) return;
-    if (!STATE.messages.length) refreshMessages();
-    if (!STATE.messages.length) return;
+  function scheduleScan(delay = SCAN_DELAY_MS) {
+    if (state.scanTimer) return;
+    state.scanTimer = window.setTimeout(scanNow, delay);
+  }
 
+  function isRootScrollEvent(event) {
     const root = getScrollRoot();
-    if (STATE.currentIndex < 0 || STATE.currentIndex >= STATE.messages.length) {
-      STATE.currentIndex = findNearestVisibleIndex(STATE.messages, root);
+    if (isWindowRoot(root)) {
+      return (
+        event.target === document ||
+        event.target === document.documentElement ||
+        event.target === document.body
+      );
     }
-    STATE.currentIndex = clamp(STATE.currentIndex + dir, 0, STATE.messages.length - 1);
-    await scrollElementToCenter(STATE.messages[STATE.currentIndex]);
-  }
-
-  async function jumpToIndex(index) {
-    if (!STATE.messages.length) refreshMessages();
-    if (!STATE.messages.length) return;
-    STATE.currentIndex = clamp(index, 0, STATE.messages.length - 1);
-    await scrollElementToCenter(STATE.messages[STATE.currentIndex]);
-  }
-
-  function refreshMessages() {
-    ensureUI();
-    STATE.messages = queryUserMessages();
-    renderTOC(false);
-  }
-
-  function scheduleScan(reason = "mutation", delay = 120) {
-    clearTimeout(STATE.scanTimer);
-    STATE.scanTimer = window.setTimeout(() => {
-      ensureUI();
-      refreshMessages();
-      if (!STATE.messages.length && STATE.bootRetries < 6) {
-        STATE.bootRetries += 1;
-        scheduleScan("retry", Math.min(1200, 180 + STATE.bootRetries * 160));
-      }
-      if (STATE.scrollLockEnabled && reason !== "nav") scheduleRestoreBurst();
-    }, delay);
-  }
-
-  function handlePossibleRouteChange() {
-    if (location.href === STATE.lastHref) return;
-    STATE.lastHref = location.href;
-    STATE.currentIndex = -1;
-    STATE.bootRetries = 0;
-    scheduleScan("nav", 180);
+    return event.target === root;
   }
 
   function installObservers() {
-    if (STATE.observer) return;
-
-    STATE.observer = new MutationObserver((mutations) => {
+    state.observer = new MutationObserver((mutations) => {
       let shouldScan = false;
       for (const mutation of mutations) {
-        if (mutation.type !== "childList") continue;
-        if (mutation.addedNodes.length || mutation.removedNodes.length) {
+        if (mutation.type === "childList" || mutation.type === "attributes") {
           shouldScan = true;
           break;
         }
       }
-      if (shouldScan) scheduleScan("mutation", 120);
+      if (shouldScan) scheduleScan();
+      scheduleMaintain();
     });
 
-    const target = document.body || document.documentElement;
-    if (target) {
-      STATE.observer.observe(target, { childList: true, subtree: true });
-    }
+    state.observer.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: [
+        "data-turn-key",
+        "data-turn-id",
+        "data-testid",
+        "data-turn",
+        "data-user-message-bubble",
+        "data-message-author-role",
+        "data-conversation-role",
+        "data-role",
+        "data-message-author"
+      ]
+    });
 
-    window.addEventListener("scroll", () => {
-      renderTOC(false);
-      if (!STATE.scrollLockEnabled) return;
-      if (now() < STATE.suppressRestoreUntil) return;
-      if (now() < STATE.userScrollUntil) {
-        updateLockedPositionFromCurrent();
-        return;
-      }
-      maybeRestoreScroll();
-    }, true);
+    window.addEventListener(
+      "scroll",
+      (event) => {
+        if (!isRootScrollEvent(event)) return;
+        updateActiveSoon();
+        if (!state.stayEnabled || state.navigationInFlight) return;
+        if (now() < state.internalScrollUntil) return;
 
-    window.addEventListener("wheel", () => setUserScrollIntent(1200), { capture: true, passive: true });
-    window.addEventListener("touchmove", () => setUserScrollIntent(1200), { capture: true, passive: true });
-    window.addEventListener("mousedown", () => setUserScrollIntent(800), true);
+        if (state.pointerScrolling || now() < state.userIntentUntil) {
+          markUserScrollIntent();
+          state.fallbackScrollTop = getScrollTop(getScrollRoot());
+          scheduleAnchorCaptureAfterUserScroll();
+        } else {
+          scheduleMaintain();
+        }
+      },
+      true
+    );
+
+    window.addEventListener(
+      "wheel",
+      (event) => {
+        if (isExtensionEvent(event)) return;
+        markUserScrollIntent(360);
+        scheduleAnchorCaptureAfterUserScroll();
+      },
+      { capture: true, passive: true }
+    );
+
+    window.addEventListener(
+      "touchstart",
+      (event) => {
+        if (isExtensionEvent(event)) return;
+        state.pointerScrolling = true;
+        markUserScrollIntent(500);
+      },
+      { capture: true, passive: true }
+    );
+
+    window.addEventListener(
+      "touchmove",
+      (event) => {
+        if (isExtensionEvent(event)) return;
+        state.pointerScrolling = true;
+        markUserScrollIntent(500);
+        scheduleAnchorCaptureAfterUserScroll();
+      },
+      { capture: true, passive: true }
+    );
+
+    window.addEventListener(
+      "touchend",
+      () => {
+        state.pointerScrolling = false;
+        markUserScrollIntent(120);
+        scheduleAnchorCaptureAfterUserScroll(130);
+      },
+      true
+    );
+
+    window.addEventListener(
+      "pointerdown",
+      (event) => {
+        if (isExtensionEvent(event)) return;
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        state.pointerScrolling = true;
+        markUserScrollIntent(500);
+      },
+      true
+    );
+
+    window.addEventListener(
+      "pointermove",
+      (event) => {
+        if (!state.pointerScrolling || isExtensionEvent(event)) return;
+        markUserScrollIntent(300);
+      },
+      { capture: true, passive: true }
+    );
+
+    const finishPointer = () => {
+      if (!state.pointerScrolling) return;
+      state.pointerScrolling = false;
+      markUserScrollIntent(120);
+      scheduleAnchorCaptureAfterUserScroll(130);
+    };
+    window.addEventListener("pointerup", finishPointer, true);
+    window.addEventListener("pointercancel", finishPointer, true);
+
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            void jump(-1);
+            return;
+          }
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            void jump(1);
+            return;
+          }
+          if (event.key.toLowerCase() === "l") {
+            event.preventDefault();
+            setStayEnabled(!state.stayEnabled, true);
+            return;
+          }
+        }
+
+        if (isEditableTarget(event.target)) return;
+        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+          markUserScrollIntent(420);
+          scheduleAnchorCaptureAfterUserScroll();
+        }
+      },
+      true
+    );
+
     window.addEventListener("resize", () => {
-      applyPanelSize();
-      renderTOC(false);
+      refreshScrollRoot();
+      updateActiveSoon();
+      if (state.stayEnabled) captureStayAnchor();
     }, { passive: true });
-    window.addEventListener("popstate", handlePossibleRouteChange, true);
-    window.addEventListener("hashchange", handlePossibleRouteChange, true);
 
-    window.addEventListener("keydown", (event) => {
-      if (event.altKey && !event.shiftKey && event.key === "ArrowUp") {
-        event.preventDefault();
-        void jump(-1);
-        return;
-      }
-      if (event.altKey && !event.shiftKey && event.key === "ArrowDown") {
-        event.preventDefault();
-        void jump(1);
-        return;
-      }
-      if (event.altKey && !event.shiftKey && event.key.toLowerCase() === "l") {
-        event.preventDefault();
-        applyLockState(!STATE.scrollLockEnabled, true);
-        return;
-      }
-      if (USER_SCROLL_KEYS.has(event.key)) setUserScrollIntent(1200);
-    }, true);
+    window.addEventListener("popstate", () => scheduleScan(0), true);
+    window.addEventListener("hashchange", () => scheduleScan(0), true);
 
-    STATE.urlPollTimer = window.setInterval(handlePossibleRouteChange, 700);
+    state.routeTimer = window.setInterval(() => {
+      if (routeKey() !== state.routeKey) scheduleScan(0);
+    }, 700);
   }
 
-  function start() {
-    ensureUI();
+  function loadPreferenceAndStart() {
+    state.routeKey = routeKey();
+    buildUI();
     installObservers();
-    refreshMessages();
-    scheduleScan("boot", 250);
-    scheduleScan("boot", 900);
-  }
 
-  function init() {
-    if (chrome?.storage?.local) {
-      chrome.storage.local.get([STORAGE_KEY, PANEL_SIZE_KEY, PANEL_MINIMIZED_KEY], (result) => {
-        STATE.scrollLockEnabled = Boolean(result?.[STORAGE_KEY]);
-        STATE.panelSize = normalizePanelSize(result?.[PANEL_SIZE_KEY]);
-        STATE.panelMinimized = Boolean(result?.[PANEL_MINIMIZED_KEY]);
-        start();
-      });
-    } else {
-      start();
+    const storage = globalThis.chrome?.storage?.local;
+    if (!storage) {
+      scanNow();
+      return;
     }
+
+    storage.get([STORAGE_KEY], (result) => {
+      state.stayEnabled = Boolean(result?.[STORAGE_KEY]);
+      updateStayButton();
+      scanNow();
+      if (state.stayEnabled) {
+        captureStayAnchor();
+        startPeriodicStayCheck();
+      }
+    });
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, { once: true });
+    document.addEventListener("DOMContentLoaded", loadPreferenceAndStart, { once: true });
   } else {
-    init();
+    loadPreferenceAndStart();
   }
 })();

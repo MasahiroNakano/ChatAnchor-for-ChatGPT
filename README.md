@@ -1,62 +1,64 @@
-This code works as of today March 25th, 2026.
+# ChatGPT Navigator + Stay v2
 
-# ChatGPT Navigator + Scroll Lock
+A small Chrome extension for long ChatGPT conversations.
 
-A lightweight Chrome extension for `chatgpt.com` that makes long conversations easier to navigate.
+## What it does
 
-It adds a compact floating navigator so you can jump between your own prompts, skim a clickable prompt list, and keep the page pinned in place while ChatGPT is still streaming a response.
+- Builds a table of contents from **your prompts** in the current conversation.
+- Click a prompt to jump to it.
+- `▲` / `▼` move to the previous / next prompt.
+- **Stay** keeps the reading position stable while ChatGPT streams, re-renders, or tries to follow the newest output.
+- **Follow** disables that protection and leaves scrolling to ChatGPT.
+- The active prompt is highlighted as you scroll.
+- The panel is isolated in a Shadow DOM so ChatGPT's CSS is less likely to break it.
 
-## Features
+## Keyboard shortcuts
 
-- Jump to the previous or next user message.
-- Browse a floating table of contents built from your prompts.
-- Click any prompt in the list to jump directly to that part of the conversation.
-- Toggle between `Follow` mode and `Stay` mode.
-- Keep scroll lock preference saved locally with `chrome.storage.local`.
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-| --- | --- |
-| `Alt` + `Up` | Jump to the previous prompt |
-| `Alt` + `Down` | Jump to the next prompt |
-| `Alt` + `L` | Toggle `Stay` / `Follow` |
-
-`Alt` maps to the `Option` key on macOS keyboards.
-
-## UI Overview
-
-The floating widget appears in the bottom-right corner of the page:
-
-- `▲` jumps to the previous prompt you sent.
-- `▼` jumps to the next prompt you sent.
-- `Stay` locks the current scroll position so new output does not pull the page away.
-- `Follow` allows ChatGPT to keep auto-scrolling as new content appears.
-- The prompt list shows truncated previews of your messages and highlights the one nearest the current viewport.
+- `Alt + Up` — previous prompt
+- `Alt + Down` — next prompt
+- `Alt + L` — toggle Stay / Follow
 
 ## Install
 
-1. Open `chrome://extensions`.
-2. Enable **Developer mode**.
-3. Click **Load unpacked**.
-4. Select this project folder.
+1. Unzip the extension folder.
+2. Open `chrome://extensions`.
+3. Turn on **Developer mode**.
+4. Click **Load unpacked**.
+5. Select the folder containing `manifest.json`.
+6. Reload any already-open `chatgpt.com` tabs once.
 
-## How It Works
+## v2 design changes
 
-- `content.js` scans the conversation for user messages, builds the floating UI, and handles navigation plus scroll-lock state.
-- `page-bridge.js` patches scroll APIs on the page so auto-scroll can be temporarily blocked while `Stay` mode is enabled.
-- `manifest.json` registers both scripts as a Manifest V3 extension for `https://chatgpt.com/*`.
+The old version patched page-level functions such as `window.scrollTo()` and `scrollIntoView()`. That depended on how ChatGPT happened to implement auto-scrolling.
+
+v2 does **not** patch ChatGPT's JavaScript. When Stay is enabled it:
+
+1. Chooses a stable conversation turn near the current reading position.
+2. Remembers that turn's exact screen position.
+3. If ChatGPT streams, re-renders, changes layout, or changes scroll position, v2 moves the conversation scroller just enough to put that same turn back at the same screen position.
+4. When you deliberately scroll, v2 waits for your scrolling to settle and records the new reading position instead.
+
+This makes Stay depend less on ChatGPT's internal scrolling implementation.
+
+## DOM compatibility strategy
+
+Prompt detection uses several signals, including:
+
+- `data-turn-key` + `data-user-message-bubble` (newer renderer)
+- `data-testid="conversation-turn-*"` / `data-turn="user"` (older/alternate renderer)
+- `data-message-author-role="user"`
+- `data-conversation-role="user"`
+- older fallback role attributes
+
+The selectors are centralized near the top of `content.js` under `SELECTORS`.
 
 ## Privacy
 
-This extension only changes the page UI locally in your browser.
+- No network requests are made by the extension.
+- Chat text is not sent anywhere.
+- Prompt text is cached only in memory for the currently open conversation and is cleared when the route changes.
+- Only the Stay / Follow preference is saved in `chrome.storage.local`.
 
-- It does not send your chats anywhere.
-- It only stores one local preference: whether scroll lock was last enabled.
+## If ChatGPT changes again
 
-## Notes
-
-- The extension currently targets `https://chatgpt.com/*`.
-- If ChatGPT changes its DOM structure, the message selectors may need to be updated.
-- This project was developed with the assistance of AI tools. 
-- It is released under the MIT License.
+If the panel appears but shows `0` prompts, inspect a user prompt in DevTools and check which stable role/turn attributes are present. Update the `SELECTORS` object near the top of `content.js`; the rest of the navigation and Stay logic should normally not need to change.
